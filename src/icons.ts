@@ -44,5 +44,6 @@ export const icons = {
     '<path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.5"/>',
   ),
   folder: svg('<path d="M3 6h6l2 2h10v10H3z"/>'),
+  search: svg('<circle cx="11" cy="11" r="6"/><path d="M16 16l4 4"/>'),
   bolt: svg('<path d="M13 3L5 14h6l-1 7 8-11h-6z"/>'),
 };

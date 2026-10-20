@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-20
+
+### Added
+
+- Sidebar table search for the active connection's current database, with
+  keyboard navigation to open a result.
+
 ## [0.2.0] - 2026-10-20
 
 ### Added

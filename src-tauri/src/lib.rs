@@ -291,6 +291,16 @@ async fn list_tables(
 }
 
 #[tauri::command]
+async fn search_tables(
+    connection_id: String,
+    query: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<TableInfo>, String> {
+    let session = get_session(&state, &connection_id)?;
+    timed(db::search_tables(&session, &query)).await
+}
+
+#[tauri::command]
 async fn list_databases(
     connection_id: String,
     state: State<'_, AppState>,
@@ -558,6 +568,7 @@ pub fn run() {
             list_schemas,
             list_enum_types,
             list_tables,
+            search_tables,
             list_databases,
             describe_table,
             table_page,

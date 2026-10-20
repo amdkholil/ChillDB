@@ -12,6 +12,7 @@ framework and no ORM.
 
 - Connect to PostgreSQL and MySQL/MariaDB, including optional SSH tunnels.
 - Browse databases, schemas, tables, and views in a sidebar.
+- Search tables in the active database directly from the sidebar.
 - Open tables with pagination, primary-key ordering, and inline cell editing.
 - Add, edit, and delete rows with NULL handling and primary-key safety.
 - Structure tab for renaming tables, truncating tables, and adding, editing, or

@@ -415,6 +415,71 @@ pub async fn list_enum_types(session: &Session) -> Result<Vec<String>, String> {
     }
 }
 
+pub async fn search_tables(
+    session: &Session,
+    query: &str,
+) -> Result<Vec<TableInfo>, String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pattern = format!("%{query}%");
+    match &session.pool {
+        DbPool::Postgres(pool) => {
+            let rows = sqlx::query(
+                "SELECT table_schema::text AS table_schema,
+                        table_name::text AS table_name,
+                        table_type::text AS table_type
+                 FROM information_schema.tables
+                 WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+                   AND table_schema NOT LIKE 'pg_toast%'
+                   AND table_schema NOT LIKE 'pg_temp%'
+                   AND table_name::text ILIKE $1
+                 ORDER BY table_schema, table_name
+                 LIMIT 100",
+            )
+            .bind(pattern)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+            rows.iter()
+                .map(|row| {
+                    Ok(TableInfo {
+                        schema: row.try_get::<String, _>("table_schema").map_err(|e| e.to_string())?,
+                        name: row.try_get::<String, _>("table_name").map_err(|e| e.to_string())?,
+                        kind: row.try_get::<String, _>("table_type").map_err(|e| e.to_string())?,
+                    })
+                })
+                .collect()
+        }
+        DbPool::Mysql(pool) => {
+            let rows = sqlx::query(
+                "SELECT CONVERT(table_schema USING utf8mb4) AS table_schema,
+                        CONVERT(table_name USING utf8mb4) AS table_name,
+                        CONVERT(table_type USING utf8mb4) AS table_type
+                 FROM information_schema.tables
+                 WHERE CONVERT(table_schema USING utf8mb4) = DATABASE()
+                   AND CONVERT(table_name USING utf8mb4) LIKE ?
+                 ORDER BY table_name
+                 LIMIT 100",
+            )
+            .bind(pattern)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+            rows.iter()
+                .map(|row| {
+                    Ok(TableInfo {
+                        schema: row.try_get::<String, _>(0).map_err(|e| e.to_string())?,
+                        name: row.try_get::<String, _>(1).map_err(|e| e.to_string())?,
+                        kind: row.try_get::<String, _>(2).map_err(|e| e.to_string())?,
+                    })
+                })
+                .collect()
+        }
+    }
+}
+
 pub async fn list_tables(session: &Session, schema: &str) -> Result<Vec<TableInfo>, String> {
     match &session.pool {
         DbPool::Postgres(pool) => {

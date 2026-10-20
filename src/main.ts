@@ -112,6 +112,11 @@ function renderShell(): void {
             <span>Connections</span>
             <button class="icon-btn" title="New connection" data-action="add-connection">${icons.plus}</button>
           </div>
+          <div class="sidebar-search">
+            <span class="sidebar-search-icon">${icons.search}</span>
+            <input id="table-search" type="search" placeholder="Connect to search tables" autocomplete="off" spellcheck="false" disabled />
+            <div id="table-search-results" class="table-search-results" hidden></div>
+          </div>
           <div id="connection-list" class="connection-list"></div>
           <div class="sidebar-foot" id="sidebar-status"></div>
         </aside>
@@ -149,6 +154,103 @@ function renderSidebar(): void {
       count === 0
         ? "No active connections"
         : `${count} active connection${count > 1 ? "s" : ""}`;
+  }
+  updateTableSearchState();
+}
+
+let tableSearchTimer: number | undefined;
+let tableSearchSeq = 0;
+let searchConnectionId: string | null = null;
+
+function searchConnection(): ConnectionState | undefined {
+  return (
+    (activeTab() ? conns.get(activeTab()!.profileId) : undefined) ||
+    (lastProfileId ? conns.get(lastProfileId) : undefined) ||
+    [...conns.values()][0]
+  );
+}
+
+function updateTableSearchState(): void {
+  const input = byId<HTMLInputElement>("table-search");
+  if (!input) return;
+  const conn = searchConnection();
+  const id = conn?.session.id ?? null;
+  input.disabled = !conn;
+  input.placeholder = conn
+    ? `Search tables in ${conn.session.database || conn.profile.name}`
+    : "Connect to search tables";
+  if (id !== searchConnectionId) {
+    searchConnectionId = id;
+    if (input.value) clearTableSearch();
+    else hideTableSearch();
+  }
+}
+
+function hideTableSearch(): void {
+  const panel = byId<HTMLDivElement>("table-search-results");
+  if (!panel) return;
+  panel.hidden = true;
+  panel.innerHTML = "";
+}
+
+function clearTableSearch(): void {
+  window.clearTimeout(tableSearchTimer);
+  tableSearchSeq += 1;
+  const input = byId<HTMLInputElement>("table-search");
+  if (input) input.value = "";
+  hideTableSearch();
+}
+
+function scheduleTableSearch(): void {
+  window.clearTimeout(tableSearchTimer);
+  const input = byId<HTMLInputElement>("table-search");
+  const query = input?.value.trim() ?? "";
+  if (!query) {
+    tableSearchSeq += 1;
+    hideTableSearch();
+    return;
+  }
+  tableSearchTimer = window.setTimeout(() => {
+    void runTableSearch(query);
+  }, 180);
+}
+
+async function runTableSearch(query: string): Promise<void> {
+  const conn = searchConnection();
+  const panel = byId<HTMLDivElement>("table-search-results");
+  if (!conn || !panel) return;
+  const seq = ++tableSearchSeq;
+  panel.hidden = false;
+  panel.innerHTML = `<div class="table-search-empty">${spinner("Searching…")}</div>`;
+
+  try {
+    const results = await api.searchTables(conn.session.id, query);
+    if (seq !== tableSearchSeq || searchConnection()?.session.id !== conn.session.id) {
+      return;
+    }
+    panel.innerHTML =
+      results.length === 0
+        ? `<div class="table-search-empty">No tables match "${esc(query)}".</div>`
+        : results
+            .map((table) => {
+              const view = isViewKind(table.kind);
+              return `
+                <button type="button" class="table-search-item"
+                  data-search-profile="${esc(conn.profile.id)}"
+                  data-search-schema="${esc(table.schema)}"
+                  data-search-table="${esc(table.name)}"
+                  data-search-kind="${esc(table.kind)}">
+                  <span class="tree-icon">${view ? icons.view : icons.table}</span>
+                  <span class="table-search-name">${esc(table.name)}</span>
+                  <span class="table-search-schema">${esc(table.schema)}</span>
+                  ${view ? '<span class="tag">view</span>' : ""}
+                </button>
+              `;
+            })
+            .join("");
+  } catch (error) {
+    if (seq !== tableSearchSeq) return;
+    panel.innerHTML = `<div class="table-search-empty error">${esc(errorMessage(error))}</div>`;
   }
 }
 
@@ -2528,6 +2630,7 @@ async function switchDatabase(
     conn.tables = {};
     conn.expandedSchemas.clear();
     conn.error = undefined;
+    clearTableSearch();
     closeDataTabsForProfile(profileId);
     lastProfileId = profileId;
     renderSidebar();
@@ -3363,9 +3466,47 @@ window.addEventListener("resize", closeRowMenu);
 
 /* ------------------------------------------------------- global listeners */
 
+document.addEventListener("input", (event) => {
+  const target = event.target as HTMLElement;
+  if (target.id === "table-search") scheduleTableSearch();
+});
+
+document.addEventListener("keydown", (event) => {
+  const target = event.target as HTMLElement;
+  if (target.id !== "table-search") return;
+  if (event.key === "Escape") {
+    clearTableSearch();
+    target.blur();
+    return;
+  }
+  if (event.key === "Enter") {
+    const first = byId<HTMLDivElement>("table-search-results")?.querySelector<
+      HTMLButtonElement
+    >("[data-search-table]");
+    if (first) {
+      event.preventDefault();
+      first.click();
+    }
+  }
+});
+
 document.addEventListener("click", (event) => {
   closeRowMenu();
   const target = event.target as HTMLElement;
+
+  const searchItem = target.closest<HTMLElement>("[data-search-table]");
+  if (searchItem) {
+    openTableTab(
+      searchItem.dataset.searchProfile ?? "",
+      searchItem.dataset.searchSchema ?? "",
+      searchItem.dataset.searchTable ?? "",
+      searchItem.dataset.searchKind ?? "",
+    );
+    clearTableSearch();
+    return;
+  }
+  if (!target.closest(".sidebar-search")) hideTableSearch();
+
   const current = activeTab();
   const rowEl = target.closest<HTMLElement>("tr[data-row-index]");
 

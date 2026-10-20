@@ -106,6 +106,10 @@ export const api = {
     return invoke("list_enum_types", { connectionId });
   },
 
+  searchTables(connectionId: string, query: string): Promise<TableInfo[]> {
+    return invoke("search_tables", { connectionId, query });
+  },
+
   listDatabases(connectionId: string): Promise<string[]> {
     return invoke("list_databases", { connectionId });
   },

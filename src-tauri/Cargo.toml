@@ -1,6 +1,6 @@
 [package]
 name = "chilldb"
-version = "0.2.0"
+version = "0.3.0"
 description = "A chill SQL client for MySQL/MariaDB and PostgreSQL"
 authors = ["ChillDB"]
 edition = "2021"
