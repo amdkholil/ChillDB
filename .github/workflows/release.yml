@@ -10,8 +10,24 @@ permissions:
   contents: write
 
 jobs:
+  version:
+    name: Verify version and changelog
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Validate manifests and CHANGELOG
+        run: node scripts/version.mjs check --tag "${GITHUB_REF_NAME}"
+
   release:
     name: Build (${{ matrix.platform }})
+    needs: version
     runs-on: ${{ matrix.platform }}
     strategy:
       fail-fast: false
@@ -38,6 +54,8 @@ jobs:
             libssl-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
+            libdbus-1-dev \
+            pkg-config \
             patchelf
 
       - name: Setup Node.js

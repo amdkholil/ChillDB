@@ -2,18 +2,47 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   CellInput,
   DbKind,
+  EditColumn,
   NewColumn,
   Profile,
   QueryResult,
+  SavedCredentials,
   SessionInfo,
   TableColumn,
   TableInfo,
 } from "./types";
 
+const recentReports = new Map<string, number>();
+
+export function reportError(
+  message: string,
+  context = "Application error",
+): void {
+  const text = message.trim();
+  if (!text) return;
+  const key = `${context}\u0000${text}`;
+  const now = Date.now();
+  if (now - (recentReports.get(key) ?? 0) < 15_000) return;
+  recentReports.set(key, now);
+  if (recentReports.size > 200) {
+    for (const [entry, at] of recentReports) {
+      if (now - at > 60_000) recentReports.delete(entry);
+    }
+  }
+  void invoke("report_error", { context, message: text }).catch(
+    () => undefined,
+  );
+}
+
 export function errorMessage(error: unknown): string {
-  if (typeof error === "string") return error;
-  if (error instanceof Error) return error.message;
-  return String(error);
+  const message =
+    typeof error === "string"
+      ? error
+      : error instanceof Error
+        ? error.message
+        : String(error);
+  reportError(message);
+  return message;
 }
 
 export const api = {
@@ -45,12 +74,36 @@ export const api = {
     return invoke("connect", { profile, password, sshSecret });
   },
 
+  switchDatabase(connectionId: string, database: string): Promise<SessionInfo> {
+    return invoke("switch_database", { connectionId, database });
+  },
+
   disconnect(connectionId: string): Promise<void> {
     return invoke("disconnect", { connectionId });
   },
 
+  saveCredentials(
+    profileId: string,
+    password: string,
+    sshSecret: string,
+  ): Promise<void> {
+    return invoke("save_credentials", { profileId, password, sshSecret });
+  },
+
+  loadCredentials(profileId: string): Promise<SavedCredentials | null> {
+    return invoke("load_credentials", { profileId });
+  },
+
+  deleteCredentials(profileId: string): Promise<void> {
+    return invoke("delete_credentials", { profileId });
+  },
+
   listSchemas(connectionId: string): Promise<string[]> {
     return invoke("list_schemas", { connectionId });
+  },
+
+  listEnumTypes(connectionId: string): Promise<string[]> {
+    return invoke("list_enum_types", { connectionId });
   },
 
   listDatabases(connectionId: string): Promise<string[]> {
@@ -117,6 +170,18 @@ export const api = {
     return invoke("run_query", { connectionId, sql });
   },
 
+  createSchema(
+    connectionId: string,
+    database: string,
+    name: string,
+  ): Promise<QueryResult> {
+    return invoke("create_schema", { connectionId, database, name });
+  },
+
+  dropSchema(connectionId: string, schema: string): Promise<QueryResult> {
+    return invoke("drop_schema", { connectionId, schema });
+  },
+
   createDatabase(connectionId: string, name: string): Promise<QueryResult> {
     return invoke("create_database", { connectionId, name });
   },
@@ -150,6 +215,14 @@ export const api = {
     return invoke("drop_table", { connectionId, schema, table });
   },
 
+  truncateTable(
+    connectionId: string,
+    schema: string,
+    table: string,
+  ): Promise<QueryResult> {
+    return invoke("truncate_table", { connectionId, schema, table });
+  },
+
   renameTable(
     connectionId: string,
     schema: string,
@@ -166,6 +239,15 @@ export const api = {
     column: NewColumn,
   ): Promise<QueryResult> {
     return invoke("add_column", { connectionId, schema, table, column });
+  },
+
+  editColumn(
+    connectionId: string,
+    schema: string,
+    table: string,
+    column: EditColumn,
+  ): Promise<QueryResult> {
+    return invoke("edit_column", { connectionId, schema, table, column });
   },
 
   dropColumn(

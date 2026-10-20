@@ -11,6 +11,12 @@ export const icons = {
   table: svg(
     '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/>',
   ),
+  columns: svg(
+    '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M15 4v16"/>',
+  ),
+  eraser: svg(
+    '<path d="M4 16L13 5l7 5-6 8H8z"/><path d="M3 20h18"/>',
+  ),
   play: svg('<path d="M7 4.5v15l12-7.5z"/>'),
   refresh: svg(
     '<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/>',

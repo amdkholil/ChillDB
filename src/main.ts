@@ -1,19 +1,45 @@
 import "./style.css";
-import { api, errorMessage } from "./api";
+import { api, errorMessage, reportError } from "./api";
 import { icons } from "./icons";
 import { closeModal, confirmDialog, esc, fmtMs, openModal, spinner, toast } from "./ui";
 import type {
+  CellInput,
   ConnectionState,
+  CreateTableColumn,
+  CreateTableTab,
   DbKind,
+  EditColumn,
   HistoryEntry,
+  NewColumn,
   Profile,
   QueryTab,
   QueryResult,
+  StructureTab,
+  TableColumn,
   TableTab,
   ViewTab,
 } from "./types";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
+
+window.addEventListener("error", (event) => {
+  reportError(
+    event.error instanceof Error ? event.error.message : event.message,
+    "Unhandled error",
+  );
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  const reason = event.reason;
+  reportError(
+    typeof reason === "string"
+      ? reason
+      : reason instanceof Error
+        ? reason.message
+        : String(reason),
+    "Unhandled rejection",
+  );
+});
 
 let profiles: Profile[] = [];
 const conns = new Map<string, ConnectionState>();
@@ -170,54 +196,58 @@ function treeHtml(profile: Profile, conn: ConnectionState): string {
   const schemas = conn.schemas;
   if (!schemas) return "";
 
-  const databaseSection =
-    profile.kind === "postgres" ? databasesHtml(profile, conn) : "";
-  const label = profile.kind === "postgres" ? "schema" : "database";
-
-  const schemaSection =
-    schemas.length === 0
-      ? `<div class="tree-loading">No ${label}s found</div>`
-      : `
-      <div class="tree-caption">
-        <span>${schemas.length} ${label}${schemas.length > 1 ? "s" : ""}</span>
-        <span class="spacer"></span>
-        ${
-          profile.kind === "mysql"
-            ? `<button class="icon-btn tiny" title="New database" data-action="create-database" data-id="${esc(profile.id)}">${icons.plus}</button>`
-            : ""
-        }
-      </div>
-      ${schemas
-        .map((schema) => {
-          const open = conn.expandedSchemas.has(schema);
-          return `
-            <div class="tree-node">
-              <div class="tree-line">
-                <button class="tree-row" data-action="toggle-schema" data-id="${esc(profile.id)}" data-schema="${esc(schema)}">
-                  <span class="chev ${open ? "open" : ""}">${icons.chevron}</span>
-                  <span class="tree-icon">${icons.folder}</span>
-                  <span class="tree-name">${esc(schema)}</span>
-                </button>
-                <span class="tree-actions">
-                  <button class="icon-btn tiny" title="New table" data-action="create-table" data-id="${esc(profile.id)}" data-schema="${esc(schema)}">${icons.plus}</button>
-                  ${
-                    profile.kind === "mysql"
-                      ? `<button class="icon-btn tiny danger" title="Drop database" data-action="drop-database" data-id="${esc(profile.id)}" data-database="${esc(schema)}">${icons.trash}</button>`
-                      : ""
-                  }
-                </span>
-              </div>
-              ${open ? tablesHtml(profile, conn, schema) : ""}
-            </div>
-          `;
-        })
-        .join("")}
-    `;
-
-  return `<div class="tree">${databaseSection}${schemaSection}</div>`;
+  const schemaSection = schemasSectionHtml(profile, conn, schemas);
+  if (profile.kind === "postgres") {
+    return `<div class="tree">${databasesHtml(conn, schemaSection)}</div>`;
+  }
+  return `<div class="tree">${schemaSection}</div>`;
 }
 
-function databasesHtml(profile: Profile, conn: ConnectionState): string {
+function schemasSectionHtml(
+  profile: Profile,
+  conn: ConnectionState,
+  schemas: string[],
+): string {
+  const label = profile.kind === "postgres" ? "schema" : "database";
+  if (schemas.length === 0) {
+    return `<div class="tree-loading">No ${label}s found</div>`;
+  }
+
+  return `
+    <div class="tree-caption">
+      <span>${schemas.length} ${label}${schemas.length > 1 ? "s" : ""}</span>
+      <span class="spacer"></span>
+      ${
+        profile.kind === "mysql"
+          ? `<button class="icon-btn tiny" title="New database" data-action="create-database" data-id="${esc(profile.id)}">${icons.plus}</button>`
+          : ""
+      }
+    </div>
+    ${schemas
+      .map((schema) => {
+        const open = conn.expandedSchemas.has(schema);
+        return `
+          <div class="tree-node">
+            <div class="tree-line">
+              <button class="tree-row" data-action="toggle-schema" data-id="${esc(profile.id)}" data-schema="${esc(schema)}">
+                <span class="chev ${open ? "open" : ""}">${icons.chevron}</span>
+                <span class="tree-icon">${icons.folder}</span>
+                <span class="tree-name">${esc(schema)}</span>
+              </button>
+              <button class="icon-btn tiny" title="New table" data-action="create-table" data-id="${esc(profile.id)}" data-schema="${esc(schema)}">${icons.plus}</button>
+            </div>
+            ${open ? tablesHtml(profile, conn, schema) : ""}
+          </div>
+        `;
+      })
+      .join("")}
+  `;
+}
+
+function databasesHtml(
+  conn: ConnectionState,
+  schemaSection: string,
+): string {
   if (conn.loadingDatabases && !conn.databases) {
     return `<div class="tree-loading">${spinner("Loading databases…")}</div>`;
   }
@@ -229,24 +259,36 @@ function databasesHtml(profile: Profile, conn: ConnectionState): string {
       <div class="tree-caption">
         <span>${databases.length} database${databases.length === 1 ? "" : "s"}</span>
         <span class="spacer"></span>
-        <button class="icon-btn tiny" title="New database" data-action="create-database" data-id="${esc(profile.id)}">${icons.plus}</button>
+        <button class="icon-btn tiny" title="New database" data-action="create-database" data-id="${esc(conn.profile.id)}">${icons.plus}</button>
       </div>
       ${databases
-        .map(
-          (database) => `
-        <div class="tree-line db-line ${database === conn.session.database ? "current" : ""}">
-          <span class="tree-row static" title="${esc(database)}">
-            <span class="tree-icon">${icons.database}</span>
-            <span class="tree-name">${esc(database)}</span>
-            ${database === conn.session.database ? '<span class="tag">current</span>' : ""}
-          </span>
-          <span class="tree-actions">
-            <button class="icon-btn tiny" title="Rename database" data-action="rename-database" data-id="${esc(profile.id)}" data-database="${esc(database)}">${icons.edit}</button>
-            <button class="icon-btn tiny danger" title="Drop database" data-action="drop-database" data-id="${esc(profile.id)}" data-database="${esc(database)}">${icons.trash}</button>
-          </span>
+        .map((database) => {
+          const current = database === conn.session.database;
+          return `
+        <div class="tree-node">
+          <div class="tree-line db-line ${current ? "current" : ""}">
+            <button class="tree-row ${current ? "static" : ""}" title="${
+              current ? "Current database" : `Open database ${esc(database)}`
+            }" ${
+              current
+                ? 'type="button"'
+                : `type="button" data-action="switch-database" data-id="${esc(conn.profile.id)}" data-database="${esc(database)}"`
+            }>
+              <span class="chev ${current ? "open" : ""}">${icons.chevron}</span>
+              <span class="tree-icon">${icons.database}</span>
+              <span class="tree-name">${esc(database)}</span>
+              ${current ? '<span class="tag">current</span>' : ""}
+            </button>
+            <button class="icon-btn tiny" title="New schema in ${esc(database)}" data-action="create-schema" data-id="${esc(conn.profile.id)}" data-database="${esc(database)}">${icons.plus}</button>
+          </div>
+          ${
+            current
+              ? `<div class="tree-children">${schemaSection}</div>`
+              : ""
+          }
         </div>
-      `,
-        )
+      `;
+        })
         .join("")}
     </div>
   `;
@@ -277,14 +319,6 @@ function tablesHtml(
             <span class="tree-name">${esc(table.name)}</span>
             ${isView ? '<span class="tag">view</span>' : ""}
           </button>
-          ${
-            isView
-              ? ""
-              : `<span class="tree-actions">
-                  <button class="icon-btn tiny" title="Rename table" data-action="rename-table" data-id="${esc(profile.id)}" data-schema="${esc(table.schema)}" data-table="${esc(table.name)}">${icons.edit}</button>
-                  <button class="icon-btn tiny danger" title="Drop table" data-action="drop-table" data-id="${esc(profile.id)}" data-schema="${esc(table.schema)}" data-table="${esc(table.name)}">${icons.trash}</button>
-                </span>`
-          }
         </div>
       `;
     })
@@ -306,7 +340,15 @@ function renderTabbar(): void {
     .map(
       (tab) => `
       <div class="tab ${tab.id === activeTabId ? "active" : ""}" data-action="activate-tab" data-tab-id="${tab.id}">
-        <span class="tab-icon">${tab.type === "query" ? icons.terminal : icons.table}</span>
+        <span class="tab-icon">${
+          tab.type === "query"
+            ? icons.terminal
+            : tab.type === "table"
+              ? icons.table
+              : tab.type === "structure"
+                ? icons.columns
+                : icons.plus
+        }</span>
         <span class="tab-title">${esc(tab.title)}</span>
         <button class="tab-close" title="Close" data-action="close-tab" data-tab-id="${tab.id}">${icons.x}</button>
       </div>
@@ -338,7 +380,9 @@ function renderWorkspace(): void {
   }
 
   if (tab.type === "query") renderQueryTab(ws, tab);
-  else renderTableTab(ws, tab);
+  else if (tab.type === "table") renderTableTab(ws, tab);
+  else if (tab.type === "structure") renderStructureTab(ws, tab);
+  else renderCreateTableTab(ws, tab);
 }
 
 function connectionOptions(selectedId: string): string {
@@ -415,18 +459,14 @@ function renderTableTab(ws: HTMLDivElement, tab: TableTab): void {
           editable
             ? `
           <button class="btn" data-action="insert-row">${icons.plus} Add row</button>
-          <button class="btn" id="btn-edit-row" data-action="edit-row">${icons.edit} Edit</button>
           <button class="btn danger" id="btn-delete-row" data-action="delete-row">${icons.trash} Delete</button>
-          <span class="toolbar-sep"></span>
-          <button class="btn ghost" data-action="table-columns">Columns</button>
-          <button class="btn ghost" data-action="rename-table">Rename</button>
-          <button class="btn ghost danger" data-action="drop-table">Drop table</button>
           <span class="toolbar-sep"></span>
         `
             : `<span class="tag">view</span>`
         }
         <button class="btn" id="btn-refresh" data-action="refresh-table">${icons.refresh} Refresh</button>
       </div>
+      <div class="result-panel" id="result-panel">${resultPanelHtml(tab)}</div>
       <div class="table-bar">
         <span id="table-count" class="table-count"></span>
         <span class="spacer"></span>
@@ -443,7 +483,6 @@ function renderTableTab(ws: HTMLDivElement, tab: TableTab): void {
         </select>
         <span class="db-kind-tag">${kind === "postgres" ? "PostgreSQL" : "MySQL"}</span>
       </div>
-      <div class="result-panel" id="result-panel">${resultPanelHtml(tab)}</div>
     </div>
   `;
 
@@ -511,15 +550,1001 @@ function updateTableToolbar(tab: TableTab): void {
   const next = byId<HTMLButtonElement>("btn-next");
   if (next) next.disabled = tab.loading || tab.page >= pageCount(tab);
 
-  const edit = byId<HTMLButtonElement>("btn-edit-row");
-  if (edit) edit.disabled = tab.loading || tab.selectedRow === null;
   const del = byId<HTMLButtonElement>("btn-delete-row");
   if (del) del.disabled = tab.loading || tab.selectedRow === null;
 }
 
+function openCreateSchemaModal(profileId: string, database: string): void {
+  const conn = conns.get(profileId);
+  if (!conn) return;
+
+  const backdrop = openModal(`
+    <form class="modal small" id="create-schema-form" novalidate>
+      <div class="modal-head">
+        <div>
+          <h2>New schema</h2>
+          <small class="modal-subtitle">${esc(database)}</small>
+        </div>
+        <button type="button" class="icon-btn" data-close="true" aria-label="Close">${icons.x}</button>
+      </div>
+      <div class="modal-body">
+        <label class="field wide">
+          <span>Schema name</span>
+          <input name="schemaName" placeholder="my_schema" autocomplete="off" spellcheck="false" required />
+        </label>
+        <div class="form-status wide" id="create-schema-status"></div>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn ghost" data-close="true">Cancel</button>
+        <span class="spacer"></span>
+        <button type="submit" class="btn primary">${icons.plus} Create schema</button>
+      </div>
+    </form>
+  `);
+
+  const form = backdrop.querySelector<HTMLFormElement>(
+    "#create-schema-form",
+  )!;
+  const status = backdrop.querySelector<HTMLDivElement>(
+    "#create-schema-status",
+  )!;
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = new FormData(form);
+    const name = String(data.get("schemaName") ?? "").trim();
+    if (!name) {
+      status.className = "form-status wide error";
+      status.textContent = "A schema name is required.";
+      return;
+    }
+    const submit = form.querySelector<HTMLButtonElement>("button[type=submit]")!;
+    submit.disabled = true;
+    status.className = "form-status wide info";
+    status.innerHTML = spinner("Creating schema…");
+    try {
+      await api.createSchema(conn.session.id, database, name);
+      closeModal();
+      if (database === conn.session.database) {
+        conn.schemas = await api.listSchemas(conn.session.id);
+        conn.expandedSchemas.add(name);
+        delete conn.tables[name];
+        renderSidebar();
+        void loadTables(profileId, name);
+        toast(`Schema "${name}" created`, "success");
+      } else {
+        toast(`Schema "${name}" created in "${database}"`, "success");
+      }
+    } catch (error) {
+      submit.disabled = false;
+      status.className = "form-status wide error";
+      status.textContent = errorMessage(error);
+    }
+  });
+}
+
+function openCreateDatabaseModal(profileId: string): void {
+  const conn = conns.get(profileId);
+  if (!conn) return;
+
+  const backdrop = openModal(`
+    <form class="modal small" id="create-database-form" novalidate>
+      <div class="modal-head">
+        <div>
+          <h2>New database</h2>
+          <small class="modal-subtitle">${esc(conn.profile.name)}</small>
+        </div>
+        <button type="button" class="icon-btn" data-close="true" aria-label="Close">${icons.x}</button>
+      </div>
+      <div class="modal-body">
+        <label class="field wide">
+          <span>Database name</span>
+          <input name="databaseName" placeholder="my_database" autocomplete="off" spellcheck="false" required />
+        </label>
+        <div class="form-status wide" id="create-database-status"></div>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn ghost" data-close="true">Cancel</button>
+        <span class="spacer"></span>
+        <button type="submit" class="btn primary">${icons.plus} Create database</button>
+      </div>
+    </form>
+  `);
+
+  const form = backdrop.querySelector<HTMLFormElement>(
+    "#create-database-form",
+  )!;
+  const status = backdrop.querySelector<HTMLDivElement>(
+    "#create-database-status",
+  )!;
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = new FormData(form);
+    const name = String(data.get("databaseName") ?? "").trim();
+    if (!name) {
+      status.className = "form-status wide error";
+      status.textContent = "A database name is required.";
+      return;
+    }
+    const submit = form.querySelector<HTMLButtonElement>("button[type=submit]")!;
+    submit.disabled = true;
+    status.className = "form-status wide info";
+    status.innerHTML = spinner("Creating database…");
+    try {
+      await api.createDatabase(conn.session.id, name);
+      if (conn.profile.kind === "postgres") {
+        conn.databases = await api.listDatabases(conn.session.id);
+      } else {
+        conn.schemas = await api.listSchemas(conn.session.id);
+        conn.expandedSchemas.add(name);
+        delete conn.tables[name];
+      }
+      closeModal();
+      renderSidebar();
+      if (conn.profile.kind === "mysql") void loadTables(profileId, name);
+      toast(`Database "${name}" created`, "success");
+    } catch (error) {
+      submit.disabled = false;
+      status.className = "form-status wide error";
+      status.textContent = errorMessage(error);
+    }
+  });
+}
+
+function openCreateTableTab(profileId: string, schema: string): void {
+  const conn = conns.get(profileId);
+  if (!conn) return;
+
+  const existing = tabs.find(
+    (tab): tab is CreateTableTab =>
+      tab.type === "create-table" &&
+      tab.profileId === profileId &&
+      tab.schema === schema,
+  );
+  if (existing) {
+    activeTabId = existing.id;
+    renderTabbar();
+    renderWorkspace();
+    return;
+  }
+
+  const kind = conn.profile.kind;
+  const tab: CreateTableTab = {
+    id: crypto.randomUUID(),
+    type: "create-table",
+    title: `New table · ${schema}`,
+    profileId,
+    connectionId: conn.session.id,
+    schema,
+    tableName: "",
+    columns: [
+      {
+        name: "",
+        dataType: columnTypes(kind)[0],
+        nullable: true,
+        primaryKey: false,
+        defaultValue: "",
+        enumValues: "",
+      },
+    ],
+  };
+  tabs.push(tab);
+  activeTabId = tab.id;
+  lastProfileId = profileId;
+  renderTabbar();
+  renderWorkspace();
+}
+
+function createTableRowHtml(
+  kind: DbKind,
+  column: CreateTableColumn,
+  index: number,
+  enumTypes: string[],
+): string {
+  return `
+    <div class="create-column with-default" data-create-row="${index}">
+      <input data-create-field="name" value="${esc(column.name)}" placeholder="column_name" autocomplete="off" spellcheck="false" />
+      <select data-create-field="type">${typeOptionsHtml(kind, column.dataType, enumTypes)}</select>
+      <input data-create-field="default" value="${esc(column.defaultValue ?? "")}" placeholder="0, 'text', CURRENT_TIMESTAMP" autocomplete="off" spellcheck="false" />
+      <label class="check"><input type="checkbox" data-create-field="nullable" ${column.nullable ? "checked" : ""} /><span>NULL</span></label>
+      <label class="check"><input type="checkbox" data-create-field="pk" ${column.primaryKey ? "checked" : ""} /><span>PK</span></label>
+      <button type="button" class="icon-btn tiny danger" data-remove-column title="Remove column">${icons.x}</button>
+      ${
+        kind === "mysql"
+          ? `<input class="create-enum-values" data-create-field="enumValues" value="${esc(column.enumValues ?? "")}" placeholder="Enum values, comma separated" autocomplete="off" spellcheck="false" ${column.dataType === "enum" ? "" : "hidden"} />`
+          : ""
+      }
+    </div>
+  `;
+}
+
+function renderCreateTableTab(ws: HTMLDivElement, tab: CreateTableTab): void {
+  const conn = conns.get(tab.profileId);
+  const kind = conn?.profile.kind ?? "postgres";
+  const enumTypes = kind === "postgres" ? (conn?.enumTypes ?? []) : [];
+
+  ws.innerHTML = `
+    <div class="view">
+      <div class="view-toolbar">
+        <span class="view-label">${icons.plus}
+          <span class="crumb">${esc(tab.schema)}</span>.<strong>New table</strong>
+        </span>
+        <span class="spacer"></span>
+        <button class="btn ghost" id="btn-cancel-create">Cancel</button>
+        <button class="btn primary" id="btn-create-table" type="submit" form="create-table-form">
+          ${icons.plus} Create table
+        </button>
+      </div>
+      <div class="structure-panel">
+        <form class="create-table-form" id="create-table-form" novalidate>
+          <label class="field wide">
+            <span>Table name</span>
+            <input name="tableName" value="${esc(tab.tableName)}" placeholder="my_table" autocomplete="off" spellcheck="false" required />
+          </label>
+          <div class="create-columns-head">
+            <span>Columns</span>
+            <span class="spacer"></span>
+            <button type="button" class="btn ghost small" id="btn-add-column">${icons.plus} Add column</button>
+          </div>
+          <div class="create-columns" id="create-columns">
+            <div class="create-column with-default create-column-head">
+              <span>Name</span>
+              <span>Type</span>
+              <span>Default</span>
+              <span>Nullable</span>
+              <span>PK</span>
+              <span></span>
+            </div>
+            ${tab.columns
+              .map((column, index) =>
+                createTableRowHtml(kind, column, index, enumTypes),
+              )
+              .join("")}
+          </div>
+          <div class="form-status wide" id="create-table-status"></div>
+        </form>
+      </div>
+    </div>
+  `;
+
+  const form = ws.querySelector<HTMLFormElement>("#create-table-form")!;
+  const status = ws.querySelector<HTMLDivElement>("#create-table-status")!;
+  const tableNameInput =
+    ws.querySelector<HTMLInputElement>('[name="tableName"]')!;
+  tableNameInput.addEventListener("input", () => {
+    tab.tableName = tableNameInput.value;
+  });
+
+  ws.querySelectorAll<HTMLElement>("[data-create-row]").forEach((row) => {
+    const index = Number(row.dataset.createRow);
+    const column = tab.columns[index];
+    if (!column) return;
+
+    row
+      .querySelector<HTMLInputElement>('[data-create-field="name"]')
+      ?.addEventListener("input", (event) => {
+        column.name = (event.target as HTMLInputElement).value;
+      });
+    const enumInput = row.querySelector<HTMLInputElement>(
+      '[data-create-field="enumValues"]',
+    );
+    row
+      .querySelector<HTMLSelectElement>('[data-create-field="type"]')
+      ?.addEventListener("change", (event) => {
+        column.dataType = (event.target as HTMLSelectElement).value;
+        if (enumInput) enumInput.hidden = column.dataType !== "enum";
+      });
+    enumInput?.addEventListener("input", () => {
+      column.enumValues = enumInput.value;
+    });
+    row
+      .querySelector<HTMLInputElement>('[data-create-field="default"]')
+      ?.addEventListener("input", (event) => {
+        column.defaultValue = (event.target as HTMLInputElement).value;
+      });
+    row
+      .querySelector<HTMLInputElement>('[data-create-field="nullable"]')
+      ?.addEventListener("change", (event) => {
+        column.nullable = (event.target as HTMLInputElement).checked;
+      });
+    row
+      .querySelector<HTMLInputElement>('[data-create-field="pk"]')
+      ?.addEventListener("change", (event) => {
+        column.primaryKey = (event.target as HTMLInputElement).checked;
+      });
+    row
+      .querySelector<HTMLButtonElement>("[data-remove-column]")
+      ?.addEventListener("click", () => {
+        if (tab.columns.length <= 1) {
+          toast("A table needs at least one column", "error");
+          return;
+        }
+        tab.columns.splice(index, 1);
+        renderWorkspace();
+      });
+  });
+
+  ws.querySelector<HTMLButtonElement>("#btn-add-column")?.addEventListener(
+    "click",
+    () => {
+      tab.columns.push({
+        name: "",
+        dataType: columnTypes(kind)[0],
+        nullable: true,
+        primaryKey: false,
+        defaultValue: "",
+        enumValues: "",
+      });
+      renderWorkspace();
+    },
+  );
+
+  ws.querySelector<HTMLButtonElement>("#btn-cancel-create")?.addEventListener(
+    "click",
+    () => closeTab(tab.id),
+  );
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const tableName = tab.tableName.trim();
+    if (!tableName) {
+      status.className = "form-status wide error";
+      status.textContent = "A table name is required.";
+      return;
+    }
+
+    const missing = tab.columns.findIndex(
+      (column) => !column.name.trim(),
+    );
+    if (missing !== -1) {
+      status.className = "form-status wide error";
+      status.textContent = `Column ${missing + 1} needs a name.`;
+      return;
+    }
+    const names = tab.columns.map((column) => column.name.trim());
+    if (new Set(names).size !== names.length) {
+      status.className = "form-status wide error";
+      status.textContent = "Column names must be unique.";
+      return;
+    }
+
+    const invalidEnum = tab.columns.findIndex(
+      (column) =>
+        column.dataType === "enum" &&
+        !(column.enumValues ?? "")
+          .split(",")
+          .some((value) => value.trim()),
+    );
+    if (invalidEnum !== -1) {
+      status.className = "form-status wide error";
+      status.textContent = `Column ${invalidEnum + 1} needs at least one enum value.`;
+      return;
+    }
+
+    const columns: NewColumn[] = tab.columns.map((column) => ({
+      name: column.name.trim(),
+      dataType:
+        column.dataType === "enum"
+          ? mysqlEnumType(column.enumValues ?? "")
+          : column.dataType,
+      nullable: column.nullable,
+      primaryKey: column.primaryKey,
+      defaultValue: (column.defaultValue ?? "").trim() || null,
+    }));
+
+    const submit = ws.querySelector<HTMLButtonElement>("#btn-create-table")!;
+    submit.disabled = true;
+    status.className = "form-status wide info";
+    status.innerHTML = spinner("Creating table…");
+    try {
+      await api.createTable(
+        tab.connectionId,
+        tab.schema,
+        tableName,
+        columns,
+      );
+      const conn = conns.get(tab.profileId);
+      if (conn) {
+        delete conn.tables[tab.schema];
+        conn.expandedSchemas.add(tab.schema);
+      }
+      closeTab(tab.id);
+      renderSidebar();
+      void loadTables(tab.profileId, tab.schema);
+      openTableTab(tab.profileId, tab.schema, tableName, "BASE TABLE");
+      toast(`Table "${tableName}" created`, "success");
+    } catch (error) {
+      submit.disabled = false;
+      status.className = "form-status wide error";
+      status.textContent = errorMessage(error);
+    }
+  });
+}
+
+function columnTypes(kind: DbKind): string[] {
+  if (kind === "postgres") {
+    return [
+      "integer",
+      "bigint",
+      "smallint",
+      "serial",
+      "bigserial",
+      "numeric(12,2)",
+      "real",
+      "double precision",
+      "boolean",
+      "text",
+      "varchar(255)",
+      "char(1)",
+      "date",
+      "time",
+      "timestamp",
+      "timestamptz",
+      "uuid",
+      "json",
+      "jsonb",
+      "bytea",
+    ];
+  }
+  return [
+    "int",
+    "bigint",
+    "smallint",
+    "tinyint",
+    "decimal(12,2)",
+    "float",
+    "double",
+    "boolean",
+    "varchar(255)",
+    "char(1)",
+    "text",
+    "longtext",
+    "date",
+    "time",
+    "datetime",
+    "timestamp",
+    "json",
+    "enum",
+    "blob",
+    "binary(16)",
+  ];
+}
+
+function typeOptionsHtml(
+  kind: DbKind,
+  selected?: string,
+  enumTypes: string[] = [],
+): string {
+  const types = [...columnTypes(kind), ...(kind === "postgres" ? enumTypes : [])];
+  if (selected && !types.includes(selected)) types.unshift(selected);
+  return types
+    .map(
+      (type) =>
+        `<option value="${esc(type)}" ${type === selected ? "selected" : ""}>${esc(type)}</option>`,
+    )
+    .join("");
+}
+
+function mysqlEnumType(values: string): string {
+  const items = values
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return `enum(${items
+    .map((value) => `'${value.replace(/\\/g, "\\\\").replace(/'/g, "''")}'`)
+    .join(",")})`;
+}
+
+function parseMysqlEnum(typeName: string): string | null {
+  if (!/^enum\(/i.test(typeName.trim())) return null;
+  const inner = typeName.trim().slice(5, -1);
+  const values: string[] = [];
+  const pattern = /'((?:[^']|'')*)'/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(inner))) {
+    values.push(match[1].replace(/''/g, "'").replace(/\\\\/g, "\\"));
+  }
+  return values.join(", ");
+}
+
+/* -------------------------------------------------------- table structure */
+
+function renderStructureTab(ws: HTMLDivElement, tab: StructureTab): void {
+  const conn = conns.get(tab.profileId);
+  const kind = conn?.profile.kind ?? "postgres";
+  const enumTypes = kind === "postgres" ? (conn?.enumTypes ?? []) : [];
+
+  ws.innerHTML = `
+    <div class="view">
+      <div class="view-toolbar">
+        <span class="view-label">${icons.columns}
+          <span class="crumb">${esc(tab.schema)}</span>.<strong>${esc(tab.table)}</strong>
+        </span>
+        <button class="btn ghost small" id="btn-rename-table" title="Rename table">
+          ${icons.edit} Rename table
+        </button>
+        <span class="spacer"></span>
+        <button class="btn" id="btn-refresh-structure">${icons.refresh} Refresh</button>
+        <span class="db-kind-tag">${kind === "postgres" ? "PostgreSQL" : "MySQL"}</span>
+      </div>
+      <div class="structure-panel">
+        ${structureHtml(tab)}
+        <form class="add-field" id="add-field-form" novalidate>
+          <div class="add-field-title">Add field</div>
+          <div class="add-field-grid">
+            <label class="field">
+              <span>Name</span>
+              <input name="name" placeholder="new_column" autocomplete="off" spellcheck="false" required />
+            </label>
+            <label class="field">
+              <span>Type</span>
+              <select name="type">${typeOptionsHtml(kind, undefined, enumTypes)}</select>
+            </label>
+            <label class="field" id="add-enum-field" hidden>
+              <span>Enum values</span>
+              <input name="enumValues" placeholder="active, inactive" autocomplete="off" spellcheck="false" />
+            </label>
+            <label class="field">
+              <span>Default</span>
+              <input name="default" placeholder="0, 'text', CURRENT_TIMESTAMP" autocomplete="off" spellcheck="false" />
+            </label>
+            <label class="check">
+              <input type="checkbox" name="nullable" checked />
+              <span>Nullable</span>
+            </label>
+            <button class="btn primary" type="submit">${icons.plus} Add field</button>
+          </div>
+          <div class="form-status" id="add-field-status"></div>
+        </form>
+      </div>
+    </div>
+  `;
+
+  byId<HTMLButtonElement>("btn-rename-table")?.addEventListener("click", () => {
+    openRenameTableModal(tab);
+  });
+  byId<HTMLButtonElement>("btn-refresh-structure")?.addEventListener(
+    "click",
+    () => void loadStructure(tab),
+  );
+
+  ws.querySelectorAll<HTMLButtonElement>("[data-field-action]").forEach(
+    (button) => {
+      button.addEventListener("click", () => {
+        const column = tab.columns?.[Number(button.dataset.fieldIndex)];
+        if (!column) return;
+        if (button.dataset.fieldAction === "edit") {
+          openEditFieldModal(tab, column);
+        } else {
+          void deleteField(tab, column);
+        }
+      });
+    },
+  );
+
+  const form = ws.querySelector<HTMLFormElement>("#add-field-form");
+  const typeSelect = form?.querySelector<HTMLSelectElement>('[name="type"]');
+  const enumField = form?.querySelector<HTMLElement>("#add-enum-field");
+  const syncEnumField = () => {
+    if (!enumField) return;
+    enumField.hidden = kind !== "mysql" || typeSelect?.value !== "enum";
+  };
+  typeSelect?.addEventListener("change", syncEnumField);
+  syncEnumField();
+  form?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void addField(tab, form);
+  });
+}
+
+function structureHtml(tab: StructureTab): string {
+  if (tab.loading) {
+    return `<div class="panel-state">${spinner("Loading structure…")}</div>`;
+  }
+  if (tab.error) {
+    return `
+      <div class="panel-state error">
+        <div class="error-title">Could not load structure</div>
+        <pre>${esc(tab.error)}</pre>
+      </div>
+    `;
+  }
+  const columns = tab.columns;
+  if (!columns) {
+    return `<div class="panel-state muted">No structure loaded.</div>`;
+  }
+  if (columns.length === 0) {
+    return `<div class="panel-state muted">This table has no fields.</div>`;
+  }
+
+  const rows = columns
+    .map(
+      (column, index) => `
+      <tr>
+        <td>
+          <span class="structure-field-name">${esc(column.name)}</span>
+          ${column.primaryKey ? '<span class="tag pk">PK</span>' : ""}
+        </td>
+        <td class="structure-type">${esc(column.typeName)}</td>
+        <td>${column.nullable ? "YES" : "NO"}</td>
+        <td class="structure-default">${
+          column.defaultValue === null
+            ? "—"
+            : esc(column.defaultValue)
+        }</td>
+        <td>${column.autoIncrement ? "auto increment" : ""}</td>
+        <td class="structure-actions-cell">
+          <span class="structure-row-actions">
+            <button class="icon-btn tiny" data-field-action="edit" data-field-index="${index}" title="Edit field">${icons.edit}</button>
+            <button class="icon-btn tiny danger" data-field-action="delete" data-field-index="${index}" title="Delete field">${icons.trash}</button>
+          </span>
+        </td>
+      </tr>
+    `,
+    )
+    .join("");
+
+  return `
+    <div class="structure-grid-wrap">
+      <table class="grid structure-grid">
+        <thead>
+          <tr>
+            <th>Field</th>
+            <th>Type</th>
+            <th>Nullable</th>
+            <th>Default</th>
+            <th>Extra</th>
+            <th class="structure-actions-head"></th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+async function loadStructure(tab: StructureTab): Promise<void> {
+  tab.loading = true;
+  tab.error = undefined;
+  if (activeTab() === tab) renderWorkspace();
+
+  try {
+    tab.columns = await api.describeTable(
+      tab.connectionId,
+      tab.schema,
+      tab.table,
+    );
+  } catch (error) {
+    tab.error = errorMessage(error);
+  } finally {
+    tab.loading = false;
+    if (activeTab() === tab) renderWorkspace();
+  }
+}
+
+async function refreshAfterStructureChange(tab: StructureTab): Promise<void> {
+  for (const other of tabs) {
+    if (
+      other.type === "table" &&
+      other.profileId === tab.profileId &&
+      other.schema === tab.schema &&
+      other.table === tab.table
+    ) {
+      other.columns = undefined;
+      other.result = undefined;
+      void loadPreview(other);
+    }
+  }
+  await loadStructure(tab);
+}
+
+function openRenameTableModal(tab: StructureTab): void {
+  const backdrop = openModal(`
+    <form class="modal small" id="rename-table-form" novalidate>
+      <div class="modal-head">
+        <div>
+          <h2>Rename table</h2>
+          <small class="modal-subtitle"><span class="crumb">${esc(tab.schema)}</span>.${esc(tab.table)}</small>
+        </div>
+        <button type="button" class="icon-btn" data-close="true" aria-label="Close">${icons.x}</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-grid">
+          <label class="field wide">
+            <span>New table name</span>
+            <input name="tableName" value="${esc(tab.table)}" autocomplete="off" spellcheck="false" required />
+          </label>
+        </div>
+        <div class="form-status wide" id="rename-table-status"></div>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn ghost" data-close="true">Cancel</button>
+        <span class="spacer"></span>
+        <button type="submit" class="btn primary">${icons.edit} Rename</button>
+      </div>
+    </form>
+  `);
+
+  const form = backdrop.querySelector<HTMLFormElement>("#rename-table-form")!;
+  const status = backdrop.querySelector<HTMLDivElement>("#rename-table-status")!;
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = new FormData(form);
+    const newName = String(data.get("tableName") ?? "").trim();
+    if (!newName) {
+      status.className = "form-status wide error";
+      status.textContent = "A new table name is required.";
+      return;
+    }
+    if (newName === tab.table) {
+      closeModal();
+      return;
+    }
+
+    const submit = form.querySelector<HTMLButtonElement>("button[type=submit]")!;
+    submit.disabled = true;
+    status.className = "form-status wide info";
+    status.innerHTML = spinner("Renaming table…");
+    try {
+      await api.renameTable(
+        tab.connectionId,
+        tab.schema,
+        tab.table,
+        newName,
+      );
+      closeModal();
+      applyTableRename(tab, newName);
+      toast(`Table renamed to ${newName}`, "success");
+    } catch (error) {
+      submit.disabled = false;
+      status.className = "form-status wide error";
+      status.textContent = errorMessage(error);
+    }
+  });
+}
+
+function applyTableRename(tab: StructureTab, newName: string): void {
+  const oldName = tab.table;
+  const conn = conns.get(tab.profileId);
+  const cached = conn?.tables[tab.schema];
+  if (conn && cached) {
+    conn.tables[tab.schema] = cached.map((table) =>
+      table.name === oldName ? { ...table, name: newName } : table,
+    );
+  }
+
+  for (const other of tabs) {
+    if (other.type !== "table" && other.type !== "structure") continue;
+    if (
+      other.profileId !== tab.profileId ||
+      other.schema !== tab.schema ||
+      other.table !== oldName
+    ) {
+      continue;
+    }
+    other.table = newName;
+    other.title = `${other.schema}.${newName}`;
+    if (other.type === "table") {
+      other.columns = undefined;
+      other.result = undefined;
+      void loadPreview(other);
+    }
+  }
+
+  renderSidebar();
+  renderTabbar();
+  renderWorkspace();
+}
+
+function editableDefault(column: TableColumn, kind: DbKind): string {
+  if (column.defaultValue === null) return "";
+  if (kind === "postgres") return column.defaultValue;
+
+  const value = column.defaultValue.trim();
+  const upper = value.toUpperCase();
+  const expression =
+    value.startsWith("(") ||
+    upper.startsWith("CURRENT_TIMESTAMP") ||
+    upper.startsWith("CURRENT_DATE") ||
+    upper.startsWith("CURRENT_TIME") ||
+    upper === "NULL";
+  if (expression) return value;
+  return `'${value.replace(/\\/g, "\\\\").replace(/'/g, "''")}'`;
+}
+
+function openEditFieldModal(tab: StructureTab, column: TableColumn): void {
+  const conn = conns.get(tab.profileId);
+  const kind = conn?.profile.kind ?? "postgres";
+  const enumTypes = kind === "postgres" ? (conn?.enumTypes ?? []) : [];
+  const originalEnumValues = kind === "mysql" ? parseMysqlEnum(column.typeName) : null;
+  const originalDefault = editableDefault(column, kind);
+  const backdrop = openModal(`
+    <form class="modal small" id="edit-field-form" novalidate>
+      <div class="modal-head">
+        <div>
+          <h2>Edit field</h2>
+          <small class="modal-subtitle"><span class="crumb">${esc(tab.schema)}</span>.${esc(tab.table)}</small>
+        </div>
+        <button type="button" class="icon-btn" data-close="true" aria-label="Close">${icons.x}</button>
+      </div>
+      <div class="modal-body">
+        <p class="row-hint">Renaming or changing a field runs an ALTER TABLE statement. Primary key and auto increment attributes are preserved when the database supports it.</p>
+        <div class="form-grid">
+          <label class="field">
+            <span>Name</span>
+            <input name="name" value="${esc(column.name)}" autocomplete="off" spellcheck="false" required />
+          </label>
+          <label class="field">
+            <span>Type</span>
+            <select name="type">${typeOptionsHtml(
+              kind,
+              originalEnumValues !== null ? "enum" : column.typeName,
+              enumTypes,
+            )}</select>
+          </label>
+          <label class="field" id="edit-enum-field" ${originalEnumValues === null ? "hidden" : ""}>
+            <span>Enum values</span>
+            <input name="enumValues" value="${esc(originalEnumValues ?? "")}" placeholder="active, inactive" autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="field wide">
+            <span>Default</span>
+            <input name="default" value="${esc(originalDefault)}" placeholder="0, 'text', CURRENT_TIMESTAMP" autocomplete="off" spellcheck="false" />
+            <small>Leave blank to remove the default. Use a SQL expression.</small>
+          </label>
+          <label class="check wide">
+            <input type="checkbox" name="nullable" ${column.nullable ? "checked" : ""} />
+            <span>Nullable</span>
+          </label>
+        </div>
+        <div class="form-status wide" id="edit-field-status"></div>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn ghost" data-close="true">Cancel</button>
+        <span class="spacer"></span>
+        <button type="submit" class="btn primary">${icons.edit} Save field</button>
+      </div>
+    </form>
+  `);
+
+  const form = backdrop.querySelector<HTMLFormElement>("#edit-field-form")!;
+  const status = backdrop.querySelector<HTMLDivElement>("#edit-field-status")!;
+  const typeSelect = form.querySelector<HTMLSelectElement>('[name="type"]');
+  const enumField = form.querySelector<HTMLElement>("#edit-enum-field");
+  const syncEnumField = () => {
+    if (!enumField) return;
+    enumField.hidden = kind !== "mysql" || typeSelect?.value !== "enum";
+  };
+  typeSelect?.addEventListener("change", syncEnumField);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = new FormData(form);
+    let dataType = String(data.get("type") ?? "").trim();
+    const edit: EditColumn = {
+      name: column.name,
+      newName: String(data.get("name") ?? "").trim(),
+      dataType,
+      nullable: data.get("nullable") === "on",
+      defaultValue: String(data.get("default") ?? "").trim() || null,
+    };
+
+    if (!edit.newName || !edit.dataType) {
+      status.className = "form-status wide error";
+      status.textContent = "A field name and type are required.";
+      return;
+    }
+    if (dataType === "enum") {
+      const values = String(data.get("enumValues") ?? "").trim();
+      if (!values.split(",").some((value) => value.trim())) {
+        status.className = "form-status wide error";
+        status.textContent = "Enter at least one enum value.";
+        return;
+      }
+      dataType = mysqlEnumType(values);
+      edit.dataType = dataType;
+    }
+    if (
+      edit.newName === column.name &&
+      edit.dataType === column.typeName &&
+      edit.nullable === column.nullable &&
+      edit.defaultValue === (originalDefault.trim() || null)
+    ) {
+      status.className = "form-status wide info";
+      status.textContent = "No changes to save.";
+      return;
+    }
+
+    const submit = form.querySelector<HTMLButtonElement>("button[type=submit]")!;
+    submit.disabled = true;
+    status.className = "form-status wide info";
+    status.innerHTML = spinner("Saving field…");
+    try {
+      await api.editColumn(
+        tab.connectionId,
+        tab.schema,
+        tab.table,
+        edit,
+      );
+      closeModal();
+      toast("Field updated", "success");
+      await refreshAfterStructureChange(tab);
+    } catch (error) {
+      submit.disabled = false;
+      status.className = "form-status wide error";
+      status.textContent = errorMessage(error);
+    }
+  });
+}
+
+async function addField(
+  tab: StructureTab,
+  form: HTMLFormElement,
+): Promise<void> {
+  const data = new FormData(form);
+  const name = String(data.get("name") ?? "").trim();
+  let dataType = String(data.get("type") ?? "").trim();
+  const nullable = data.get("nullable") === "on";
+  const defaultValue = String(data.get("default") ?? "").trim() || null;
+  const status = form.querySelector<HTMLDivElement>("#add-field-status")!;
+  if (!name || !dataType) {
+    status.className = "form-status error";
+    status.textContent = "A field name and type are required.";
+    return;
+  }
+  if (dataType === "enum") {
+    const values = String(data.get("enumValues") ?? "").trim();
+    if (!values.split(",").some((value) => value.trim())) {
+      status.className = "form-status error";
+      status.textContent = "Enter at least one enum value.";
+      return;
+    }
+    dataType = mysqlEnumType(values);
+  }
+
+  const submit = form.querySelector<HTMLButtonElement>("button[type=submit]")!;
+  submit.disabled = true;
+  status.className = "form-status info";
+  status.innerHTML = spinner("Adding field…");
+  try {
+    await api.addColumn(tab.connectionId, tab.schema, tab.table, {
+      name,
+      dataType,
+      nullable,
+      primaryKey: false,
+      defaultValue,
+    });
+    form.reset();
+    status.className = "form-status success";
+    status.textContent = `Field "${name}" added.`;
+    toast(`Field "${name}" added`, "success");
+    await refreshAfterStructureChange(tab);
+  } catch (error) {
+    submit.disabled = false;
+    status.className = "form-status error";
+    status.textContent = errorMessage(error);
+  }
+}
+
+async function deleteField(
+  tab: StructureTab,
+  column: TableColumn,
+): Promise<void> {
+  const confirmed = await confirmDialog(
+    "Delete field",
+    `Delete field "${column.name}" from "${tab.table}"? This cannot be undone.`,
+  );
+  if (!confirmed) return;
+
+  try {
+    await api.dropColumn(tab.connectionId, tab.schema, tab.table, column.name);
+    toast(`Field "${column.name}" deleted`, "success");
+    await refreshAfterStructureChange(tab);
+  } catch (error) {
+    toast(errorMessage(error), "error");
+  }
+}
+
 /* ------------------------------------------------------------ result view */
 
-function resultPanelHtml(tab: ViewTab): string {
+function resultPanelHtml(tab: QueryTab | TableTab): string {
   if (tab.type === "query" && tab.running) {
     return `<div class="panel-state">${spinner("Running query…")}</div>`;
   }
@@ -537,10 +1562,21 @@ function resultPanelHtml(tab: ViewTab): string {
   if (!tab.result) {
     return `<div class="panel-state muted">${tab.type === "query" ? "Run a query to see results here." : ""}</div>`;
   }
-  return gridHtml(tab.result);
+  if (tab.type === "table") {
+    return gridHtml(
+      tab.result,
+      tab.selectedRow,
+      (tab.page - 1) * tab.pageSize,
+    );
+  }
+  return gridHtml(tab.result, null);
 }
 
-function gridHtml(result: QueryResult): string {
+function gridHtml(
+  result: QueryResult,
+  selectedRow: number | null,
+  rowOffset = 0,
+): string {
   const affected = result.rowsAffected;
   const meta = `
     <div class="result-meta">
@@ -568,9 +1604,9 @@ function gridHtml(result: QueryResult): string {
   const body = result.rows
     .map(
       (row, index) => `
-      <tr>
-        <td class="rownum">${index + 1}</td>
-        ${row.map(cellHtml).join("")}
+      <tr class="${selectedRow === index ? "selected" : ""}" data-row-index="${index}">
+        <td class="rownum">${rowOffset + index + 1}</td>
+        ${row.map((value, column) => cellHtml(value, column)).join("")}
       </tr>
     `,
     )
@@ -587,24 +1623,26 @@ function gridHtml(result: QueryResult): string {
   `;
 }
 
-function cellHtml(value: unknown): string {
+function cellHtml(value: unknown, columnIndex: number): string {
+  const attrs = `data-col-index="${columnIndex}"`;
   if (value === null || value === undefined) {
-    return `<td class="cell null">NULL</td>`;
+    return `<td class="cell null" ${attrs}>NULL</td>`;
   }
   if (typeof value === "number") {
-    return `<td class="cell num">${esc(value)}</td>`;
+    return `<td class="cell num" ${attrs}>${esc(value)}</td>`;
   }
   if (typeof value === "boolean") {
-    return `<td class="cell bool">${value ? "true" : "false"}</td>`;
+    return `<td class="cell bool" ${attrs}>${value ? "true" : "false"}</td>`;
   }
   const text = typeof value === "string" ? value : JSON.stringify(value);
   if (text === "") {
-    return `<td class="cell empty">empty</td>`;
+    return `<td class="cell empty" ${attrs}>empty</td>`;
   }
-  return `<td class="cell" title="${esc(text.slice(0, 2000))}"><span class="cell-text">${esc(text)}</span></td>`;
+  return `<td class="cell" ${attrs} title="${esc(text.slice(0, 2000))}"><span class="cell-text">${esc(text)}</span></td>`;
 }
 
 function updateResultPanel(tab: ViewTab): void {
+  if (tab.type === "structure" || tab.type === "create-table") return;
   if (activeTab() !== tab) return;
   const panel = byId<HTMLDivElement>("result-panel");
   if (panel) panel.innerHTML = resultPanelHtml(tab);
@@ -660,6 +1698,7 @@ async function runQuery(tab: QueryTab): Promise<void> {
       durationMs: result.durationMs,
       ok: true,
     });
+    if (conn.profile.kind === "postgres") void refreshEnumTypes(conn.profile.id);
   } catch (error) {
     tab.error = errorMessage(error);
     pushHistory({
@@ -687,6 +1726,7 @@ async function loadPreview(tab: TableTab): Promise<void> {
 
   tab.loading = true;
   tab.error = undefined;
+  tab.selectedRow = null;
   updateResultPanel(tab);
   updateTableToolbar(tab);
 
@@ -715,6 +1755,509 @@ async function loadPreview(tab: TableTab): Promise<void> {
     tab.loading = false;
     updateResultPanel(tab);
     updateTableToolbar(tab);
+  }
+}
+
+/* --------------------------------------------------------------- row CRUD */
+
+function cellToText(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return JSON.stringify(value);
+}
+
+function cellToInput(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  return cellToText(value);
+}
+
+function isLongTextField(typeName: string): boolean {
+  const type = typeName.toLowerCase();
+  return type === "json" || type === "jsonb" || type.includes("text");
+}
+
+function selectedRow(tab: TableTab): unknown[] | null {
+  if (tab.selectedRow === null) return null;
+  return tab.result?.rows[tab.selectedRow] ?? null;
+}
+
+function rowByColumn(
+  tab: TableTab,
+  row: unknown[],
+): Map<string, unknown> {
+  const values = new Map<string, unknown>();
+  tab.result?.columns.forEach((column, index) => {
+    values.set(column.name, row[index]);
+  });
+  return values;
+}
+
+function openRowEditor(tab: TableTab, mode: "insert" | "edit"): void {
+  if (tab.isView) {
+    toast("Views are read-only", "error");
+    return;
+  }
+
+  const original = mode === "edit" ? selectedRow(tab) : null;
+  if (mode === "edit" && !original) {
+    toast("Select a row first", "error");
+    return;
+  }
+
+  const current = rowByColumn(tab, original ?? []);
+
+  void (async () => {
+    let columns: TableColumn[];
+    try {
+      columns = await api.describeTable(
+        tab.connectionId,
+        tab.schema,
+        tab.table,
+      );
+    } catch (error) {
+      toast(errorMessage(error), "error");
+      return;
+    }
+
+    if (mode === "edit" && !columns.some((column) => column.primaryKey)) {
+      toast("This table has no primary key, so rows cannot be edited safely", "error");
+      return;
+    }
+
+    const fields = columns
+      .map((column, index) => {
+        const isAuto = mode === "insert" && column.autoIncrement;
+        const isKey = mode === "edit" && column.primaryKey;
+        const locked = isAuto || isKey;
+        const value = current.get(column.name);
+        const isNull =
+          mode === "edit" && (value === null || value === undefined);
+        const placeholder = isAuto
+          ? "auto-generated"
+          : column.defaultValue
+            ? `default: ${column.defaultValue}`
+            : column.nullable
+              ? "NULL"
+              : column.typeName;
+        const longText = isLongTextField(column.typeName);
+        const fieldValue = isAuto ? "" : cellToText(value);
+        return `
+          <label class="row-field ${locked ? "locked" : ""} ${longText ? "long" : ""}">
+            <span class="row-field-head">
+              <span class="row-field-name">${esc(column.name)}</span>
+              <span class="row-field-type">${esc(column.typeName)}</span>
+              ${column.primaryKey ? '<span class="tag pk">PK</span>' : ""}
+              ${column.autoIncrement ? '<span class="tag">auto</span>' : ""}
+            </span>
+            <span class="row-field-control">
+              ${
+                longText
+                  ? `<textarea
+                data-row-field="${index}"
+                placeholder="${esc(placeholder)}"
+                spellcheck="false"
+                ${locked ? "disabled" : ""}
+              >${esc(fieldValue)}</textarea>`
+                  : `<input
+                data-row-field="${index}"
+                value="${esc(fieldValue)}"
+                placeholder="${esc(placeholder)}"
+                autocomplete="off"
+                spellcheck="false"
+                ${locked ? "disabled" : ""}
+              />`
+              }
+              ${
+                column.nullable && !locked
+                  ? `<label class="null-check"><input type="checkbox" data-null-field="${index}" ${isNull ? "checked" : ""} /> NULL</label>`
+                  : ""
+              }
+            </span>
+            ${
+              column.defaultValue
+                ? `<small class="row-field-default">default: ${esc(column.defaultValue)}</small>`
+                : ""
+            }
+          </label>
+        `;
+      })
+      .join("");
+
+    const backdrop = openModal(`
+      <form class="modal row-modal" id="row-form" novalidate>
+        <div class="modal-head">
+          <div>
+            <h2>${mode === "insert" ? "Add row" : "Edit row"}</h2>
+            <small class="modal-subtitle"><span class="crumb">${esc(tab.schema)}</span>.${esc(tab.table)}</small>
+          </div>
+          <button type="button" class="icon-btn" data-close="true" aria-label="Close">${icons.x}</button>
+        </div>
+        <div class="modal-body">
+          <p class="row-hint">
+            ${
+              mode === "insert"
+                ? "Blank fields with a default use that default. Other blank text inserts an empty string; check NULL for a SQL NULL value."
+                : "Primary key columns are used to identify the row and cannot be changed. Blank text updates the column to an empty string."
+            }
+          </p>
+          <div class="row-editor">${fields}</div>
+          <div class="form-status" id="row-status"></div>
+        </div>
+        <div class="modal-foot">
+          <button type="button" class="btn ghost" data-close="true">Cancel</button>
+          <span class="spacer"></span>
+          <button type="submit" class="btn primary">
+            ${mode === "insert" ? `${icons.plus} Add row` : `${icons.edit} Save changes`}
+          </button>
+        </div>
+      </form>
+    `);
+
+    const form = backdrop.querySelector<HTMLFormElement>("#row-form")!;
+    const status = backdrop.querySelector<HTMLDivElement>("#row-status")!;
+
+    backdrop
+      .querySelectorAll<HTMLInputElement>("[data-null-field]")
+      .forEach((box) => {
+        const index = Number(box.dataset.nullField);
+        const input = form.querySelector<
+          HTMLInputElement | HTMLTextAreaElement
+        >(`[data-row-field="${index}"]`);
+        if (!input) return;
+        const sync = () => {
+          input.disabled = box.checked;
+          if (box.checked) input.value = "";
+        };
+        box.addEventListener("change", sync);
+        sync();
+      });
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const submit = form.querySelector<HTMLButtonElement>("button[type=submit]")!;
+
+      const cells: CellInput[] = [];
+      for (let index = 0; index < columns.length; index++) {
+        const column = columns[index];
+        if (mode === "insert" && column.autoIncrement) continue;
+        if (mode === "edit" && column.primaryKey) continue;
+
+        const input = form.querySelector<
+          HTMLInputElement | HTMLTextAreaElement
+        >(`[data-row-field="${index}"]`);
+        if (!input) continue;
+
+        const nullBox = form.querySelector<HTMLInputElement>(
+          `[data-null-field="${index}"]`,
+        );
+        const value = nullBox?.checked ? null : input.value;
+
+        if (
+          mode === "insert" &&
+          value === "" &&
+          column.defaultValue !== null &&
+          column.defaultValue !== undefined
+        ) {
+          continue;
+        }
+
+        if (mode === "edit") {
+          const oldValue = current.get(column.name);
+          const oldText =
+            oldValue === null || oldValue === undefined
+              ? null
+              : cellToText(oldValue);
+          if (value === oldText) continue;
+        }
+        cells.push({ column: column.name, value });
+      }
+
+      if (mode === "edit" && cells.length === 0) {
+        status.className = "form-status info";
+        status.textContent = "No changes to save.";
+        return;
+      }
+
+      const keys: CellInput[] = columns
+        .filter((column) => column.primaryKey)
+        .map((column) => ({
+          column: column.name,
+          value:
+            mode === "edit"
+              ? cellToInput(current.get(column.name))
+              : null,
+        }));
+
+      if (
+        mode === "edit" &&
+        keys.some((key) => key.value === null)
+      ) {
+        status.className = "form-status error";
+        status.textContent =
+          "This row has a NULL primary key value and cannot be changed safely.";
+        return;
+      }
+
+      submit.disabled = true;
+      status.className = "form-status info";
+      status.innerHTML = spinner(mode === "insert" ? "Adding row…" : "Saving…");
+
+      try {
+        const result =
+          mode === "insert"
+            ? await api.insertRow(
+                tab.connectionId,
+                tab.schema,
+                tab.table,
+                cells,
+              )
+            : await api.updateRow(
+                tab.connectionId,
+                tab.schema,
+                tab.table,
+                cells,
+                keys,
+              );
+
+        const count = result.rowsAffected ?? 1;
+        closeModal();
+        if (count === 0) {
+          toast("No rows were changed. The row may have been modified or deleted.", "error");
+        } else {
+          toast(
+            `${count} row${count === 1 ? "" : "s"} ${mode === "insert" ? "added" : "updated"}`,
+            "success",
+          );
+        }
+        tab.selectedRow = null;
+        await loadPreview(tab);
+      } catch (error) {
+        submit.disabled = false;
+        status.className = "form-status error";
+        status.textContent = errorMessage(error);
+      }
+    });
+  })();
+}
+
+async function tableColumns(tab: TableTab): Promise<TableColumn[]> {
+  if (tab.columns) return tab.columns;
+  tab.columns = await api.describeTable(
+    tab.connectionId,
+    tab.schema,
+    tab.table,
+  );
+  return tab.columns;
+}
+
+async function beginInlineEdit(
+  tab: TableTab,
+  cell: HTMLTableCellElement,
+  rowIndex: number,
+  columnIndex: number,
+): Promise<void> {
+  if (tab.isView) {
+    toast("Views are read-only", "error");
+    return;
+  }
+  if (cell.classList.contains("editing")) return;
+
+  const row = tab.result?.rows[rowIndex];
+  const resultColumn = tab.result?.columns[columnIndex];
+  if (!row || !resultColumn) return;
+
+  let columns: TableColumn[];
+  try {
+    columns = await tableColumns(tab);
+  } catch (error) {
+    toast(errorMessage(error), "error");
+    return;
+  }
+  if (!cell.isConnected) return;
+
+  const column = columns.find((item) => item.name === resultColumn.name);
+  if (!column) return;
+  if (column.primaryKey) {
+    toast("Primary key columns cannot be edited inline", "error");
+    return;
+  }
+  if (!columns.some((item) => item.primaryKey)) {
+    toast(
+      "This table has no primary key, so rows cannot be edited safely",
+      "error",
+    );
+    return;
+  }
+
+  const values = rowByColumn(tab, row);
+  const keys: CellInput[] = columns
+    .filter((item) => item.primaryKey)
+    .map((item) => ({
+      column: item.name,
+      value: cellToInput(values.get(item.name)),
+    }));
+  if (keys.some((key) => key.value === null)) {
+    toast(
+      "This row has a NULL primary key value and cannot be changed safely",
+      "error",
+    );
+    return;
+  }
+
+  const originalValue = row[columnIndex];
+  const originalText = cellToText(originalValue);
+  const originalHtml = cell.innerHTML;
+  const originalClass = cell.className;
+  const input = document.createElement("input");
+  let done = false;
+
+  const restore = () => {
+    if (!cell.isConnected) return;
+    cell.className = originalClass;
+    cell.innerHTML = originalHtml;
+  };
+
+  const cancel = () => {
+    if (done) return;
+    done = true;
+    restore();
+  };
+
+  const commit = async () => {
+    if (done) return;
+    const value = input.value;
+    if (value === originalText) {
+      cancel();
+      return;
+    }
+    if (
+      (originalValue === null || originalValue === undefined) &&
+      value === ""
+    ) {
+      cancel();
+      return;
+    }
+    done = true;
+    input.disabled = true;
+    cell.classList.add("saving");
+
+    try {
+      const result = await api.updateRow(
+        tab.connectionId,
+        tab.schema,
+        tab.table,
+        [{ column: column.name, value }],
+        keys,
+      );
+      const count = result.rowsAffected ?? 1;
+      if (count === 0) {
+        toast(
+          "No rows were changed. The row may have been modified or deleted.",
+          "error",
+        );
+        restore();
+        return;
+      }
+      toast("Row updated", "success");
+      await loadPreview(tab);
+    } catch (error) {
+      toast(errorMessage(error), "error");
+      restore();
+    }
+  };
+
+  input.className = "cell-input";
+  input.value = originalText;
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  cell.classList.add("editing");
+  cell.textContent = "";
+  cell.appendChild(input);
+  input.focus();
+  input.select();
+
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void commit();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      cancel();
+    }
+  });
+  input.addEventListener("blur", () => {
+    if (!done) void commit();
+  });
+}
+
+async function deleteSelectedRow(tab: TableTab): Promise<void> {
+  if (tab.isView) {
+    toast("Views are read-only", "error");
+    return;
+  }
+  const row = selectedRow(tab);
+  if (!row) {
+    toast("Select a row first", "error");
+    return;
+  }
+
+  try {
+    const columns = await api.describeTable(
+      tab.connectionId,
+      tab.schema,
+      tab.table,
+    );
+    const keys = columns.filter((column) => column.primaryKey);
+    if (keys.length === 0) {
+      toast("This table has no primary key, so rows cannot be deleted safely", "error");
+      return;
+    }
+
+    const current = rowByColumn(tab, row);
+    const keyCells: CellInput[] = keys.map((column) => ({
+      column: column.name,
+      value: cellToInput(current.get(column.name)),
+    }));
+    if (keyCells.some((key) => key.value === null)) {
+      toast("This row has a NULL primary key value and cannot be deleted safely", "error");
+      return;
+    }
+
+    const where = keys
+      .map((column) => {
+        const text = cellToInput(current.get(column.name)) ?? "NULL";
+        const short = text.length > 60 ? `${text.slice(0, 60)}…` : text;
+        return `${column.name} = ${short}`;
+      })
+      .join(", ");
+
+    const confirmed = await confirmDialog(
+      "Delete row",
+      `Delete the row where ${where}? This cannot be undone.`,
+      "Delete row",
+    );
+    if (!confirmed) return;
+
+    const result = await api.deleteRow(
+      tab.connectionId,
+      tab.schema,
+      tab.table,
+      keyCells,
+    );
+    const count = result.rowsAffected ?? 1;
+    if (count === 0) {
+      toast("No rows were deleted. The row may already be gone.", "error");
+    } else {
+      toast(`${count} row${count === 1 ? "" : "s"} deleted`, "success");
+    }
+    tab.selectedRow = null;
+    await loadPreview(tab);
+  } catch (error) {
+    toast(errorMessage(error), "error");
   }
 }
 
@@ -793,6 +2336,100 @@ function openTableTab(
   void loadPreview(tab);
 }
 
+function openStructureTab(
+  profileId: string,
+  schema: string,
+  table: string,
+): void {
+  const conn = conns.get(profileId);
+  if (!conn) return;
+
+  const existing = tabs.find(
+    (tab): tab is StructureTab =>
+      tab.type === "structure" &&
+      tab.profileId === profileId &&
+      tab.schema === schema &&
+      tab.table === table,
+  );
+  if (existing) {
+    activeTabId = existing.id;
+    renderTabbar();
+    renderWorkspace();
+    if (!existing.columns && !existing.loading) void loadStructure(existing);
+    return;
+  }
+
+  const tab: StructureTab = {
+    id: crypto.randomUUID(),
+    type: "structure",
+    title: `${schema}.${table}`,
+    profileId,
+    connectionId: conn.session.id,
+    schema,
+    table,
+    loading: false,
+  };
+  tabs.push(tab);
+  activeTabId = tab.id;
+  lastProfileId = profileId;
+  renderTabbar();
+  renderWorkspace();
+  void loadStructure(tab);
+}
+
+function closeTabsForTable(
+  profileId: string,
+  schema: string,
+  table: string,
+): void {
+  const closing = tabs.filter(
+    (tab) =>
+      (tab.type === "table" || tab.type === "structure") &&
+      tab.profileId === profileId &&
+      tab.schema === schema &&
+      tab.table === table,
+  );
+  if (closing.length === 0) return;
+
+  const activeClosed = closing.some((tab) => tab.id === activeTabId);
+  for (let index = tabs.length - 1; index >= 0; index--) {
+    const tab = tabs[index];
+    if (
+      (tab.type === "table" || tab.type === "structure") &&
+      tab.profileId === profileId &&
+      tab.schema === schema &&
+      tab.table === table
+    ) {
+      tabs.splice(index, 1);
+    }
+  }
+  if (activeClosed) {
+    const next = tabs[tabs.length - 1];
+    activeTabId = next ? next.id : null;
+  }
+  renderTabbar();
+  renderWorkspace();
+}
+
+function closeTabsForSchema(profileId: string, schema: string): void {
+  const matches = (tab: ViewTab) =>
+    (tab.type === "table" ||
+      tab.type === "structure" ||
+      tab.type === "create-table") &&
+    tab.profileId === profileId &&
+    tab.schema === schema;
+  const closing = tabs.filter(matches);
+  if (closing.length === 0) return;
+
+  const activeClosed = closing.some((tab) => tab.id === activeTabId);
+  for (let index = tabs.length - 1; index >= 0; index--) {
+    if (matches(tabs[index])) tabs.splice(index, 1);
+  }
+  if (activeClosed) {
+    activeTabId = tabs.length > 0 ? tabs[tabs.length - 1].id : null;
+  }
+}
+
 function activateTab(id: string): void {
   if (activeTabId === id) return;
   activeTabId = id;
@@ -821,6 +2458,17 @@ function closeTabsForProfile(profileId: string): void {
   }
 }
 
+function closeDataTabsForProfile(profileId: string): void {
+  for (let i = tabs.length - 1; i >= 0; i--) {
+    if (tabs[i].profileId === profileId && tabs[i].type !== "query") {
+      tabs.splice(i, 1);
+    }
+  }
+  if (!tabs.some((tab) => tab.id === activeTabId)) {
+    activeTabId = tabs.length > 0 ? tabs[tabs.length - 1].id : null;
+  }
+}
+
 /* --------------------------------------------------------- connection flow */
 
 async function connectProfile(profile: Profile, secrets: Secrets): Promise<void> {
@@ -843,13 +2491,55 @@ async function connectProfile(profile: Profile, secrets: Secrets): Promise<void>
     loadingSchemas: false,
     loadingDatabases: false,
     loadingTables: new Set(),
+    enumTypes: [],
   });
+  if (profile.kind === "postgres") await refreshEnumTypes(profile.id);
   lastProfileId = profile.id;
   renderSidebar();
   renderTabbar();
   renderWorkspace();
   void loadSchemas(profile.id);
   if (profile.kind === "postgres") void loadDatabases(profile.id);
+}
+
+async function refreshEnumTypes(profileId: string): Promise<void> {
+  const conn = conns.get(profileId);
+  if (!conn || conn.profile.kind !== "postgres") return;
+  try {
+    conn.enumTypes = await api.listEnumTypes(conn.session.id);
+  } catch {
+    conn.enumTypes = [];
+  }
+}
+
+async function switchDatabase(
+  profileId: string,
+  database: string,
+): Promise<void> {
+  const conn = conns.get(profileId);
+  if (!conn || database === conn.session.database) return;
+
+  try {
+    const session = await api.switchDatabase(conn.session.id, database);
+    conn.session = session;
+    conn.profile = { ...conn.profile, database: session.database };
+    conn.schemas = null;
+    conn.databases = null;
+    conn.tables = {};
+    conn.expandedSchemas.clear();
+    conn.error = undefined;
+    closeDataTabsForProfile(profileId);
+    lastProfileId = profileId;
+    renderSidebar();
+    renderTabbar();
+    renderWorkspace();
+    await refreshEnumTypes(profileId);
+    void loadSchemas(profileId);
+    void loadDatabases(profileId);
+    toast(`Opened database "${session.database}"`, "success");
+  } catch (error) {
+    toast(errorMessage(error), "error");
+  }
 }
 
 async function disconnectProfile(profileId: string): Promise<void> {
@@ -922,6 +2612,59 @@ async function loadTables(profileId: string, schema: string): Promise<void> {
   }
 }
 
+/* ---------------------------------------------------------- saved secrets */
+
+async function storeCredentials(
+  profile: Profile,
+  secrets: Secrets,
+  wasSaved: boolean,
+): Promise<void> {
+  let merged = { ...secrets };
+  if (wasSaved) {
+    const previous = await api.loadCredentials(profile.id).catch(() => null);
+    if (previous) {
+      if (!merged.password) merged.password = previous.password;
+      if (!merged.sshSecret) merged.sshSecret = previous.sshSecret;
+    }
+  }
+  await api.saveCredentials(profile.id, merged.password, merged.sshSecret);
+}
+
+async function resolveSavedSecrets(
+  profile: Profile,
+  secrets: Secrets,
+  wasSaved: boolean,
+): Promise<Secrets> {
+  if (!profile.savePassword || !wasSaved) return secrets;
+  if (secrets.password && secrets.sshSecret) return secrets;
+  const previous = await api.loadCredentials(profile.id).catch(() => null);
+  if (!previous) return secrets;
+  return {
+    password: secrets.password || previous.password,
+    sshSecret: secrets.sshSecret || previous.sshSecret,
+  };
+}
+
+async function connectSavedOrPrompt(profile: Profile): Promise<void> {
+  if (profile.savePassword) {
+    try {
+      const saved = await api.loadCredentials(profile.id);
+      if (saved) {
+        try {
+          await connectProfile(profile, saved);
+          toast(`Connected to ${profile.name}`, "success");
+          return;
+        } catch (error) {
+          toast(`Saved password failed: ${errorMessage(error)}`, "error");
+        }
+      }
+    } catch (error) {
+      toast(errorMessage(error), "error");
+    }
+  }
+  openConnectModal(profile);
+}
+
 /* ----------------------------------------------------------------- modals */
 
 function readConnectionForm(form: HTMLFormElement): {
@@ -940,6 +2683,7 @@ function readConnectionForm(form: HTMLFormElement): {
       username: String(data.get("username") ?? ""),
       database: String(data.get("database") ?? ""),
       ssl: data.get("ssl") === "on",
+      savePassword: data.get("savePassword") === "on",
       sshEnabled: data.get("sshEnabled") === "on",
       sshHost: String(data.get("sshHost") ?? ""),
       sshPort: Number(data.get("sshPort") ?? 22),
@@ -969,6 +2713,7 @@ function openConnectionModal(existing?: Profile): void {
       username: "",
       database: "",
       ssl: false,
+      savePassword: false,
       sshEnabled: false,
       sshHost: "",
       sshPort: 22,
@@ -1015,8 +2760,12 @@ function openConnectionModal(existing?: Profile): void {
         </label>
         <label class="field wide">
           <span>Password</span>
-          <input name="password" type="password" autocomplete="off" placeholder="••••••••" />
-          <small>Used for this session only, never written to disk.</small>
+          <input name="password" type="password" autocomplete="off" placeholder="${existing?.savePassword ? "Saved in the OS keychain — leave blank to keep it" : "••••••••"}" />
+          <small>Used for this session only unless you save it in the OS keychain.</small>
+        </label>
+        <label class="check wide">
+          <input type="checkbox" name="savePassword" ${profile.savePassword ? "checked" : ""} />
+          <span>Save password in the OS keychain (GNOME Keyring, KWallet, or Windows Credential Manager)</span>
         </label>
         <label class="check wide">
           <input type="checkbox" name="ssl" ${profile.ssl ? "checked" : ""} />
@@ -1122,10 +2871,15 @@ function openConnectionModal(existing?: Profile): void {
       button.disabled = true;
       setStatus(spinner("Connecting…"), "info");
       try {
+        const testSecrets = await resolveSavedSecrets(
+          candidate,
+          secrets,
+          Boolean(existing?.savePassword),
+        );
         const version = await api.testConnection(
           candidate,
-          secrets.password,
-          secrets.sshSecret,
+          testSecrets.password,
+          testSecrets.sshSecret,
         );
         setStatus(`Connected · ${esc(version)}`, "success");
       } catch (error) {
@@ -1151,13 +2905,31 @@ function openConnectionModal(existing?: Profile): void {
     submit.disabled = true;
     setStatus(spinner("Saving…"), "info");
 
+    const wasSaved = Boolean(existing?.savePassword);
     try {
       const saved = await api.saveProfile(candidate);
+      try {
+        if (saved.savePassword) {
+          await storeCredentials(saved, secrets, wasSaved);
+        } else if (wasSaved) {
+          await api.deleteCredentials(saved.id);
+        }
+      } catch (error) {
+        toast(`Password not saved: ${errorMessage(error)}`, "error");
+      }
+
       profiles = await api.listProfiles();
       closeModal();
       renderSidebar();
+
+      const connectSecrets = await resolveSavedSecrets(
+        saved,
+        secrets,
+        wasSaved,
+      ).catch(() => secrets);
+
       try {
-        await connectProfile(saved, secrets);
+        await connectProfile(saved, connectSecrets);
         toast(`Connected to ${saved.name}`, "success");
       } catch (error) {
         toast(errorMessage(error), "error");
@@ -1196,6 +2968,10 @@ function openConnectModal(profile: Profile): void {
                </label>`
             : ""
         }
+        <label class="check wide">
+          <input type="checkbox" name="savePassword" ${profile.savePassword ? "checked" : ""} />
+          <span>Save ${profile.sshEnabled ? "database and SSH passwords" : "password"} in the OS keychain</span>
+        </label>
         <div class="form-status wide" id="form-status"></div>
       </div>
       <div class="modal-foot">
@@ -1216,14 +2992,39 @@ function openConnectModal(profile: Profile): void {
       password: String(data.get("password") ?? ""),
       sshSecret: String(data.get("sshSecret") ?? ""),
     };
+    const save = data.get("savePassword") === "on";
     const submit = form.querySelector<HTMLButtonElement>("button[type=submit]")!;
     submit.disabled = true;
     status.className = "form-status wide info";
-    status.innerHTML = spinner("Connecting…");
+    status.innerHTML = spinner(save ? "Saving password and connecting…" : "Connecting…");
+
+    let updated = profile;
+    let connectSecrets = secrets;
     try {
-      await connectProfile(profile, secrets);
+      connectSecrets = await resolveSavedSecrets(
+        profile,
+        secrets,
+        profile.savePassword,
+      );
+
+      if (save !== profile.savePassword) {
+        updated = await api.saveProfile({ ...profile, savePassword: save });
+        profiles = await api.listProfiles();
+      }
+
+      if (save) {
+        await storeCredentials(updated, connectSecrets, profile.savePassword);
+      } else if (profile.savePassword) {
+        await api.deleteCredentials(updated.id);
+      }
+    } catch (error) {
+      toast(`Password not saved: ${errorMessage(error)}`, "error");
+    }
+
+    try {
+      await connectProfile(updated, connectSecrets);
       closeModal();
-      toast(`Connected to ${profile.name}`, "success");
+      toast(`Connected to ${updated.name}`, "success");
     } catch (error) {
       submit.disabled = false;
       status.className = "form-status wide error";
@@ -1292,10 +3093,295 @@ function openHistoryModal(): void {
   });
 }
 
+/* ------------------------------------------------------------ row menu */
+
+let rowMenu: HTMLDivElement | null = null;
+
+function closeRowMenu(): void {
+  rowMenu?.remove();
+  rowMenu = null;
+}
+
+function showRowMenu(tab: TableTab, x: number, y: number): void {
+  closeRowMenu();
+  const menu = document.createElement("div");
+  menu.className = "context-menu";
+  menu.innerHTML = `<button type="button">${icons.edit}<span>Edit in modal</span></button>`;
+  document.body.appendChild(menu);
+
+  const rect = menu.getBoundingClientRect();
+  const left = Math.max(8, Math.min(x, window.innerWidth - rect.width - 8));
+  const top = Math.max(8, Math.min(y, window.innerHeight - rect.height - 8));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+
+  menu.querySelector("button")?.addEventListener("click", () => {
+    closeRowMenu();
+    openRowEditor(tab, "edit");
+  });
+
+  rowMenu = menu;
+}
+
+document.addEventListener("dblclick", (event) => {
+  const target = event.target as HTMLElement;
+  if (target.closest("input, textarea, select")) return;
+  const cell = target.closest<HTMLTableCellElement>("td[data-col-index]");
+  const rowEl = target.closest<HTMLElement>("tr[data-row-index]");
+  const tab = activeTab();
+  if (!cell || !rowEl || tab?.type !== "table") return;
+
+  const rowIndex = Number(rowEl.dataset.rowIndex);
+  const columnIndex = Number(cell.dataset.colIndex);
+  if (!Number.isFinite(rowIndex) || !Number.isFinite(columnIndex)) return;
+  void beginInlineEdit(tab, cell, rowIndex, columnIndex);
+});
+
+function showSchemaMenu(
+  profileId: string,
+  schema: string,
+  x: number,
+  y: number,
+): void {
+  closeRowMenu();
+  const menu = document.createElement("div");
+  menu.className = "context-menu";
+  menu.innerHTML = `
+    <button type="button" class="danger" data-schema-menu="delete">${icons.trash}<span>Delete</span></button>
+  `;
+  document.body.appendChild(menu);
+
+  const rect = menu.getBoundingClientRect();
+  const left = Math.max(8, Math.min(x, window.innerWidth - rect.width - 8));
+  const top = Math.max(8, Math.min(y, window.innerHeight - rect.height - 8));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+
+  menu
+    .querySelector<HTMLButtonElement>('[data-schema-menu="delete"]')
+    ?.addEventListener("click", () => {
+      closeRowMenu();
+      void deleteSchemaAction(profileId, schema);
+    });
+
+  rowMenu = menu;
+}
+
+function showTableMenu(
+  profileId: string,
+  schema: string,
+  table: string,
+  x: number,
+  y: number,
+): void {
+  closeRowMenu();
+  const menu = document.createElement("div");
+  menu.className = "context-menu";
+  menu.innerHTML = `
+    <button type="button" data-table-menu="structure">${icons.columns}<span>Structure</span></button>
+    <div class="context-sep"></div>
+    <button type="button" class="warn" data-table-menu="truncate">${icons.eraser}<span>Truncate</span></button>
+    <button type="button" class="danger" data-table-menu="delete">${icons.trash}<span>Delete</span></button>
+  `;
+  document.body.appendChild(menu);
+
+  const rect = menu.getBoundingClientRect();
+  const left = Math.max(8, Math.min(x, window.innerWidth - rect.width - 8));
+  const top = Math.max(8, Math.min(y, window.innerHeight - rect.height - 8));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+
+  menu
+    .querySelector<HTMLButtonElement>('[data-table-menu="structure"]')
+    ?.addEventListener("click", () => {
+      closeRowMenu();
+      openStructureTab(profileId, schema, table);
+    });
+  menu
+    .querySelector<HTMLButtonElement>('[data-table-menu="truncate"]')
+    ?.addEventListener("click", () => {
+      closeRowMenu();
+      void truncateTableAction(profileId, schema, table);
+    });
+  menu
+    .querySelector<HTMLButtonElement>('[data-table-menu="delete"]')
+    ?.addEventListener("click", () => {
+      closeRowMenu();
+      void deleteTableAction(profileId, schema, table);
+    });
+
+  rowMenu = menu;
+}
+
+async function deleteSchemaAction(
+  profileId: string,
+  schema: string,
+): Promise<void> {
+  const conn = conns.get(profileId);
+  if (!conn) return;
+
+  const label = conn.profile.kind === "postgres" ? "schema" : "database";
+  const contents =
+    conn.profile.kind === "postgres"
+      ? " and all of its tables, views, and other objects"
+      : "";
+  const confirmed = await confirmDialog(
+    `Delete ${label}`,
+    `Drop ${label} "${schema}"${contents}? This cannot be undone.`,
+  );
+  if (!confirmed) return;
+
+  try {
+    await api.dropSchema(conn.session.id, schema);
+    conn.schemas = (conn.schemas ?? []).filter((item) => item !== schema);
+    conn.expandedSchemas.delete(schema);
+    delete conn.tables[schema];
+    closeTabsForSchema(profileId, schema);
+    renderSidebar();
+    renderTabbar();
+    renderWorkspace();
+    toast(`${label[0].toUpperCase()}${label.slice(1)} "${schema}" deleted`, "success");
+  } catch (error) {
+    toast(errorMessage(error), "error");
+  }
+}
+
+async function truncateTableAction(
+  profileId: string,
+  schema: string,
+  table: string,
+): Promise<void> {
+  const conn = conns.get(profileId);
+  if (!conn) return;
+
+  const confirmed = await confirmDialog(
+    "Truncate table",
+    `Delete all rows from "${schema}.${table}"? This cannot be undone.`,
+  );
+  if (!confirmed) return;
+
+  try {
+    await api.truncateTable(conn.session.id, schema, table);
+    toast("Table truncated", "success");
+    for (const tab of tabs) {
+      if (
+        tab.type === "table" &&
+        tab.profileId === profileId &&
+        tab.schema === schema &&
+        tab.table === table &&
+        !tab.loading
+      ) {
+        void loadPreview(tab);
+      }
+    }
+  } catch (error) {
+    toast(errorMessage(error), "error");
+  }
+}
+
+async function deleteTableAction(
+  profileId: string,
+  schema: string,
+  table: string,
+): Promise<void> {
+  const conn = conns.get(profileId);
+  if (!conn) return;
+
+  const confirmed = await confirmDialog(
+    "Delete table",
+    `Drop "${schema}.${table}"? This cannot be undone.`,
+  );
+  if (!confirmed) return;
+
+  try {
+    await api.dropTable(conn.session.id, schema, table);
+    const cached = conn.tables[schema];
+    if (cached) {
+      conn.tables[schema] = cached.filter((item) => item.name !== table);
+    }
+    closeTabsForTable(profileId, schema, table);
+    renderSidebar();
+    toast(`Table "${table}" deleted`, "success");
+  } catch (error) {
+    toast(errorMessage(error), "error");
+  }
+}
+
+document.addEventListener("contextmenu", (event) => {
+  const target = event.target as HTMLElement;
+
+  const schemaRow = target.closest<HTMLElement>(
+    '.tree-row[data-action="toggle-schema"]',
+  );
+  if (schemaRow) {
+    event.preventDefault();
+    showSchemaMenu(
+      schemaRow.dataset.id ?? "",
+      schemaRow.dataset.schema ?? "",
+      event.clientX,
+      event.clientY,
+    );
+    return;
+  }
+
+  const treeRow = target.closest<HTMLElement>(
+    '.tree-row[data-action="open-table"]',
+  );
+  if (treeRow) {
+    const kind = treeRow.dataset.kind ?? "";
+    if (isViewKind(kind)) return;
+    event.preventDefault();
+    showTableMenu(
+      treeRow.dataset.id ?? "",
+      treeRow.dataset.schema ?? "",
+      treeRow.dataset.table ?? "",
+      event.clientX,
+      event.clientY,
+    );
+    return;
+  }
+
+  const rowEl = target.closest<HTMLElement>("tr[data-row-index]");
+  const tab = activeTab();
+  if (!rowEl || tab?.type !== "table" || tab.isView) return;
+
+  const index = Number(rowEl.dataset.rowIndex);
+  if (!Number.isFinite(index)) return;
+  event.preventDefault();
+
+  tab.selectedRow = index;
+  rowEl.parentElement
+    ?.querySelectorAll("tr.selected")
+    .forEach((row) => row.classList.remove("selected"));
+  rowEl.classList.add("selected");
+  updateTableToolbar(tab);
+  showRowMenu(tab, event.clientX, event.clientY);
+});
+
+document.addEventListener("scroll", closeRowMenu, true);
+window.addEventListener("resize", closeRowMenu);
+
 /* ------------------------------------------------------- global listeners */
 
 document.addEventListener("click", (event) => {
+  closeRowMenu();
   const target = event.target as HTMLElement;
+  const current = activeTab();
+  const rowEl = target.closest<HTMLElement>("tr[data-row-index]");
+
+  if (current?.type === "table" && rowEl) {
+    const index = Number(rowEl.dataset.rowIndex);
+    if (Number.isFinite(index)) {
+      current.selectedRow = index;
+      rowEl.parentElement
+        ?.querySelectorAll("tr.selected")
+        .forEach((row) => row.classList.remove("selected"));
+      rowEl.classList.add("selected");
+      updateTableToolbar(current);
+    }
+    return;
+  }
+
   const actionEl = target.closest<HTMLElement>("[data-action]");
   if (!actionEl) return;
 
@@ -1312,9 +3398,19 @@ document.addEventListener("click", (event) => {
     case "new-query":
       newQueryTab();
       break;
+    case "insert-row": {
+      const tab = activeTab();
+      if (tab?.type === "table") openRowEditor(tab, "insert");
+      break;
+    }
+    case "delete-row": {
+      const tab = activeTab();
+      if (tab?.type === "table") void deleteSelectedRow(tab);
+      break;
+    }
     case "connect": {
       const profile = profiles.find((p) => p.id === id);
-      if (profile) openConnectModal(profile);
+      if (profile) void connectSavedOrPrompt(profile);
       break;
     }
     case "disconnect":
@@ -1350,12 +3446,28 @@ document.addEventListener("click", (event) => {
       if (!profile) break;
       const conn = conns.get(id);
       if (!conn) {
-        openConnectModal(profile);
+        void connectSavedOrPrompt(profile);
         break;
       }
       conn.expanded = !conn.expanded;
       renderSidebar();
       if (conn.expanded && !conn.schemas) void loadSchemas(id);
+      break;
+    }
+    case "switch-database": {
+      void switchDatabase(id, actionEl.dataset.database ?? "");
+      break;
+    }
+    case "create-schema": {
+      openCreateSchemaModal(id, actionEl.dataset.database ?? "");
+      break;
+    }
+    case "create-database": {
+      openCreateDatabaseModal(id);
+      break;
+    }
+    case "create-table": {
+      openCreateTableTab(id, actionEl.dataset.schema ?? "");
       break;
     }
     case "toggle-schema": {

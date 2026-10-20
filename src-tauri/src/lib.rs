@@ -1,4 +1,6 @@
 mod db;
+mod notify;
+mod secrets;
 mod ssh;
 
 use std::{
@@ -10,8 +12,8 @@ use std::{
 };
 
 use db::{
-    CellInput, DbKind, NewColumn, Profile, QueryResult, Session, SessionInfo, TableColumn,
-    TableInfo,
+    CellInput, DbKind, EditColumn, NewColumn, Profile, QueryResult, Session, SessionInfo,
+    TableColumn, TableInfo,
 };
 use tauri::{Manager, State};
 use uuid::Uuid;
@@ -20,6 +22,7 @@ pub struct AppState {
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     profiles: Mutex<Vec<Profile>>,
     profiles_path: PathBuf,
+    webhook_path: PathBuf,
 }
 
 fn load_profiles(path: &PathBuf) -> Vec<Profile> {
@@ -96,11 +99,16 @@ fn save_profile(mut profile: Profile, state: State<'_, AppState>) -> Result<Prof
     }
 
     write_profiles(&state.profiles_path, &profiles)?;
+
+    if !profile.save_password {
+        let _ = secrets::delete(&profile.id);
+    }
     Ok(profile)
 }
 
 #[tauri::command]
 async fn delete_profile(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let _ = secrets::delete(&id);
     {
         let mut profiles = state
             .profiles
@@ -141,6 +149,15 @@ async fn timed<T>(
     tokio::time::timeout(Duration::from_secs(120), future)
         .await
         .map_err(|_| "Query timed out after 120 seconds".to_string())?
+}
+
+#[tauri::command]
+async fn report_error(
+    context: String,
+    message: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    notify::report(&state.webhook_path, &context, &message).await
 }
 
 #[tauri::command]
@@ -191,6 +208,28 @@ async fn connect(
 }
 
 #[tauri::command]
+async fn switch_database(
+    connection_id: String,
+    database: String,
+    state: State<'_, AppState>,
+) -> Result<SessionInfo, String> {
+    let session = get_session(&state, &connection_id)?;
+    let switched = timed(db::connect_database(&session, &database)).await?;
+    let info = SessionInfo {
+        id: connection_id.clone(),
+        kind: switched.kind,
+        database: switched.database.clone(),
+        server_version: switched.server_version.clone(),
+    };
+    state
+        .sessions
+        .lock()
+        .map_err(|_| "Internal lock error".to_string())?
+        .insert(connection_id, Arc::new(switched));
+    Ok(info)
+}
+
+#[tauri::command]
 async fn disconnect(connection_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let session = state
         .sessions
@@ -205,12 +244,40 @@ async fn disconnect(connection_id: String, state: State<'_, AppState>) -> Result
 }
 
 #[tauri::command]
+fn save_credentials(
+    profile_id: String,
+    password: String,
+    ssh_secret: String,
+) -> Result<(), String> {
+    secrets::save(&profile_id, &password, &ssh_secret)
+}
+
+#[tauri::command]
+fn load_credentials(profile_id: String) -> Result<Option<secrets::StoredSecrets>, String> {
+    secrets::load(&profile_id)
+}
+
+#[tauri::command]
+fn delete_credentials(profile_id: String) -> Result<(), String> {
+    secrets::delete(&profile_id)
+}
+
+#[tauri::command]
 async fn list_schemas(
     connection_id: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<String>, String> {
     let session = get_session(&state, &connection_id)?;
     db::list_schemas(&session).await
+}
+
+#[tauri::command]
+async fn list_enum_types(
+    connection_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let session = get_session(&state, &connection_id)?;
+    db::list_enum_types(&session).await
 }
 
 #[tauri::command]
@@ -327,6 +394,17 @@ async fn drop_table(
 }
 
 #[tauri::command]
+async fn truncate_table(
+    connection_id: String,
+    schema: String,
+    table: String,
+    state: State<'_, AppState>,
+) -> Result<QueryResult, String> {
+    let session = get_session(&state, &connection_id)?;
+    timed(db::truncate_table(&session, &schema, &table)).await
+}
+
+#[tauri::command]
 async fn rename_table(
     connection_id: String,
     schema: String,
@@ -351,6 +429,18 @@ async fn add_column(
 }
 
 #[tauri::command]
+async fn edit_column(
+    connection_id: String,
+    schema: String,
+    table: String,
+    column: EditColumn,
+    state: State<'_, AppState>,
+) -> Result<QueryResult, String> {
+    let session = get_session(&state, &connection_id)?;
+    timed(db::edit_column(&session, &schema, &table, &column)).await
+}
+
+#[tauri::command]
 async fn drop_column(
     connection_id: String,
     schema: String,
@@ -360,6 +450,27 @@ async fn drop_column(
 ) -> Result<QueryResult, String> {
     let session = get_session(&state, &connection_id)?;
     timed(db::drop_column(&session, &schema, &table, &column)).await
+}
+
+#[tauri::command]
+async fn create_schema(
+    connection_id: String,
+    database: String,
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<QueryResult, String> {
+    let session = get_session(&state, &connection_id)?;
+    timed(db::create_schema(&session, &database, &name)).await
+}
+
+#[tauri::command]
+async fn drop_schema(
+    connection_id: String,
+    schema: String,
+    state: State<'_, AppState>,
+) -> Result<QueryResult, String> {
+    let session = get_session(&state, &connection_id)?;
+    timed(db::drop_schema(&session, &schema)).await
 }
 
 #[tauri::command]
@@ -421,23 +532,31 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             fs::create_dir_all(&data_dir)?;
             let profiles_path = data_dir.join("connections.json");
+            let webhook_path = data_dir.join("discord-webhook");
             let profiles = load_profiles(&profiles_path);
 
             app.manage(AppState {
                 sessions: Mutex::new(HashMap::new()),
                 profiles: Mutex::new(profiles),
                 profiles_path,
+                webhook_path,
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             list_profiles,
             save_profile,
+            report_error,
             delete_profile,
             test_connection,
             connect,
+            switch_database,
             disconnect,
+            save_credentials,
+            load_credentials,
+            delete_credentials,
             list_schemas,
+            list_enum_types,
             list_tables,
             list_databases,
             describe_table,
@@ -447,9 +566,13 @@ pub fn run() {
             delete_row,
             create_table,
             drop_table,
+            truncate_table,
             rename_table,
             add_column,
+            edit_column,
             drop_column,
+            create_schema,
+            drop_schema,
             create_database,
             drop_database,
             rename_database,

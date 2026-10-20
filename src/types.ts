@@ -10,6 +10,7 @@ export interface Profile {
   username: string;
   database: string;
   ssl: boolean;
+  savePassword: boolean;
   sshEnabled: boolean;
   sshHost: string;
   sshPort: number;
@@ -17,6 +18,11 @@ export interface Profile {
   sshAuth: SshAuth;
   sshKeyPath: string;
   sshVerifyHost: boolean;
+}
+
+export interface SavedCredentials {
+  password: string;
+  sshSecret: string;
 }
 
 export interface SessionInfo {
@@ -60,6 +66,15 @@ export interface NewColumn {
   dataType: string;
   nullable: boolean;
   primaryKey: boolean;
+  defaultValue?: string | null;
+}
+
+export interface EditColumn {
+  name: string;
+  newName: string;
+  dataType: string;
+  nullable: boolean;
+  defaultValue: string | null;
 }
 
 export interface CellInput {
@@ -92,11 +107,40 @@ export interface TableTab {
   pageSize: number;
   selectedRow: number | null;
   result?: QueryResult;
+  columns?: TableColumn[];
   error?: string;
   loading: boolean;
 }
 
-export type ViewTab = QueryTab | TableTab;
+export interface StructureTab {
+  id: string;
+  type: "structure";
+  title: string;
+  profileId: string;
+  connectionId: string;
+  schema: string;
+  table: string;
+  columns?: TableColumn[];
+  loading: boolean;
+  error?: string;
+}
+
+export interface CreateTableColumn extends NewColumn {
+  enumValues?: string;
+}
+
+export interface CreateTableTab {
+  id: string;
+  type: "create-table";
+  title: string;
+  profileId: string;
+  connectionId: string;
+  schema: string;
+  tableName: string;
+  columns: CreateTableColumn[];
+}
+
+export type ViewTab = QueryTab | TableTab | StructureTab | CreateTableTab;
 
 export interface ConnectionState {
   profile: Profile;
@@ -108,6 +152,7 @@ export interface ConnectionState {
   expandedSchemas: Set<string>;
   loadingSchemas: boolean;
   loadingDatabases: boolean;
+  enumTypes: string[];
   loadingTables: Set<string>;
   error?: string;
 }

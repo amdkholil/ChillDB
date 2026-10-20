@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::{sync::Arc, time::{Duration, Instant}};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -6,7 +6,7 @@ use sqlx::{
     mysql::{MySqlPoolOptions, MySqlRow},
     postgres::{PgPoolOptions, PgRow},
     types::{
-        chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc},
+        chrono::{DateTime, Local, NaiveDate, NaiveDateTime, NaiveTime, Utc},
         BigDecimal, Json, Uuid,
     },
     Column, Executor, MySql, Pool, Postgres, Row, TypeInfo, ValueRef,
@@ -52,6 +52,8 @@ pub struct Profile {
     pub database: String,
     #[serde(default)]
     pub ssl: bool,
+    #[serde(default)]
+    pub save_password: bool,
     #[serde(default)]
     pub ssh_enabled: bool,
     #[serde(default)]
@@ -123,6 +125,22 @@ pub struct NewColumn {
     pub nullable: bool,
     #[serde(default)]
     pub primary_key: bool,
+    #[serde(default)]
+    pub default_value: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditColumn {
+    pub name: String,
+    #[serde(default)]
+    pub new_name: String,
+    #[serde(default)]
+    pub data_type: String,
+    #[serde(default = "default_true")]
+    pub nullable: bool,
+    #[serde(default)]
+    pub default_value: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -153,7 +171,9 @@ pub struct Session {
     pub database: String,
     pub server_version: String,
     pub pool: DbPool,
-    _tunnel: Option<SshTunnel>,
+    target: Profile,
+    password: String,
+    _tunnel: Option<Arc<SshTunnel>>,
 }
 
 fn connection_url(profile: &Profile, password: &str) -> Result<String, String> {
@@ -219,7 +239,7 @@ pub async fn connect(
     ssh_secret: &str,
 ) -> Result<Session, String> {
     let tunnel = if profile.ssh_enabled {
-        Some(SshTunnel::start(profile, ssh_secret)?)
+        Some(Arc::new(SshTunnel::start(profile, ssh_secret)?))
     } else {
         None
     };
@@ -235,7 +255,7 @@ pub async fn connect(
 
     let url = connection_url(&target, password)?;
 
-    let (pool, version): (DbPool, String) = match profile.kind {
+    let (pool, version, database): (DbPool, String, String) = match profile.kind {
         DbKind::Postgres => {
             let pool = PgPoolOptions::new()
                 .max_connections(5)
@@ -247,7 +267,11 @@ pub async fn connect(
                 .fetch_one(&pool)
                 .await
                 .unwrap_or_else(|_| "PostgreSQL".to_string());
-            (DbPool::Postgres(pool), version)
+            let database = sqlx::query_scalar::<_, String>("SELECT current_database()")
+                .fetch_one(&pool)
+                .await
+                .unwrap_or_else(|_| profile.database.clone());
+            (DbPool::Postgres(pool), version, database)
         }
         DbKind::Mysql => {
             let pool = MySqlPoolOptions::new()
@@ -260,17 +284,57 @@ pub async fn connect(
                 .fetch_one(&pool)
                 .await
                 .unwrap_or_else(|_| "MySQL/MariaDB".to_string());
-            (DbPool::Mysql(pool), version)
+            (DbPool::Mysql(pool), version, profile.database.clone())
         }
     };
 
     Ok(Session {
         profile_id: profile.id.clone(),
         kind: profile.kind,
-        database: profile.database.clone(),
+        database,
         server_version: version,
         pool,
+        target,
+        password: password.to_string(),
         _tunnel: tunnel,
+    })
+}
+
+pub async fn connect_database(session: &Session, database: &str) -> Result<Session, String> {
+    let database = database.trim();
+    if database.is_empty() {
+        return Err("Database name is required.".to_string());
+    }
+    if session.kind != DbKind::Postgres {
+        return Err("Switching databases is only supported for PostgreSQL.".to_string());
+    }
+    if database == session.database {
+        return Err("This database is already open.".to_string());
+    }
+
+    let mut target = session.target.clone();
+    target.database = database.to_string();
+    let url = connection_url(&target, &session.password)?;
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .acquire_timeout(Duration::from_secs(12))
+        .connect(&url)
+        .await
+        .map_err(|e| format!("Could not open database \"{database}\": {e}"))?;
+    let current = sqlx::query_scalar::<_, String>("SELECT current_database()")
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|_| database.to_string());
+
+    Ok(Session {
+        profile_id: session.profile_id.clone(),
+        kind: session.kind,
+        database: current,
+        server_version: session.server_version.clone(),
+        pool: DbPool::Postgres(pool),
+        target,
+        password: session.password.clone(),
+        _tunnel: session._tunnel.clone(),
     })
 }
 
@@ -324,6 +388,30 @@ pub async fn list_schemas(session: &Session) -> Result<Vec<String>, String> {
                 .map(|row| row.try_get::<String, _>(0).map_err(|e| e.to_string()))
                 .collect()
         }
+    }
+}
+
+pub async fn list_enum_types(session: &Session) -> Result<Vec<String>, String> {
+    match &session.pool {
+        DbPool::Postgres(pool) => {
+            let rows = sqlx::query(
+                "SELECT quote_ident(n.nspname) || '.' || quote_ident(t.typname) AS enum_name
+                 FROM pg_type t
+                 JOIN pg_enum e ON e.enumtypid = t.oid
+                 JOIN pg_namespace n ON n.oid = t.typnamespace
+                 WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+                   AND n.nspname NOT LIKE 'pg_toast%'
+                 GROUP BY n.nspname, t.typname
+                 ORDER BY enum_name",
+            )
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+            rows.iter()
+                .map(|row| row.try_get::<String, _>("enum_name").map_err(|e| e.to_string()))
+                .collect()
+        }
+        DbPool::Mysql(_) => Ok(Vec::new()),
     }
 }
 
@@ -454,10 +542,14 @@ async fn count_rows(session: &Session, qualified: &str) -> Result<u64, String> {
             .await
             .map(|n| n as u64)
             .map_err(|e| e.to_string()),
-        DbPool::Mysql(pool) => sqlx::query_scalar::<_, u64>(&sql)
-            .fetch_one(pool)
-            .await
-            .map_err(|e| e.to_string()),
+        DbPool::Mysql(pool) => {
+            let sql = format!("SELECT CAST(COUNT(*) AS SIGNED) FROM {qualified}");
+            sqlx::query_scalar::<_, i64>(&sql)
+                .fetch_one(pool)
+                .await
+                .map(|n| n.max(0) as u64)
+                .map_err(|e| e.to_string())
+        }
     }
 }
 
@@ -786,6 +878,14 @@ fn column_definition(column: &NewColumn, kind: DbKind) -> Result<String, String>
     if !column.nullable {
         definition.push_str(" NOT NULL");
     }
+    if let Some(default) = column
+        .default_value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        definition.push_str(&format!(" DEFAULT {default}"));
+    }
     Ok(definition)
 }
 
@@ -836,6 +936,18 @@ pub async fn drop_table(
     execute(session, &sql).await
 }
 
+pub async fn truncate_table(
+    session: &Session,
+    schema: &str,
+    table: &str,
+) -> Result<QueryResult, String> {
+    let sql = format!(
+        "TRUNCATE TABLE {}",
+        qualified_name(schema, table, session.kind)
+    );
+    execute(session, &sql).await
+}
+
 pub async fn rename_table(
     session: &Session,
     schema: &str,
@@ -871,6 +983,159 @@ pub async fn add_column(
     execute(session, &sql).await
 }
 
+fn mysql_default_literal(value: &str) -> String {
+    let trimmed = value.trim();
+    let upper = trimmed.to_ascii_uppercase();
+    let is_expression = trimmed.starts_with('(')
+        || upper.starts_with("CURRENT_TIMESTAMP")
+        || upper.starts_with("CURRENT_DATE")
+        || upper.starts_with("CURRENT_TIME")
+        || upper == "NULL";
+    if is_expression {
+        trimmed.to_string()
+    } else {
+        sql_literal(trimmed, DbKind::Mysql)
+    }
+}
+
+pub async fn edit_column(
+    session: &Session,
+    schema: &str,
+    table: &str,
+    edit: &EditColumn,
+) -> Result<QueryResult, String> {
+    let name = edit.name.trim();
+    if name.is_empty() {
+        return Err("Column name is required.".to_string());
+    }
+    let new_name = edit.new_name.trim();
+    let new_name = if new_name.is_empty() { name } else { new_name };
+    let data_type = edit.data_type.trim();
+
+    let current = describe_table(session, schema, table)
+        .await?
+        .into_iter()
+        .find(|column| column.name == name)
+        .ok_or_else(|| format!("Column '{name}' was not found."))?;
+    let data_type = if data_type.is_empty() {
+        current.type_name.clone()
+    } else {
+        data_type.to_string()
+    };
+
+    let provided_default = edit
+        .default_value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let current_default = current
+        .default_value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let mysql_current_default = current
+        .default_value
+        .as_deref()
+        .map(mysql_default_literal);
+
+    let renamed = new_name != name;
+    let type_changed = data_type != current.type_name;
+    let null_changed = edit.nullable != current.nullable;
+    let default_changed = match session.kind {
+        DbKind::Postgres => provided_default != current_default,
+        DbKind::Mysql => provided_default != mysql_current_default,
+    };
+    if !renamed && !type_changed && !null_changed && !default_changed {
+        return Err("There are no changes to save.".to_string());
+    }
+
+    let qualified = qualified_name(schema, table, session.kind);
+    let target = quote_ident(new_name, session.kind);
+
+    match session.kind {
+        DbKind::Postgres => {
+            let mut result = None;
+            if renamed {
+                result = Some(
+                    execute(
+                        session,
+                        &format!(
+                            "ALTER TABLE {qualified} RENAME COLUMN {} TO {target}",
+                            quote_ident(name, session.kind)
+                        ),
+                    )
+                    .await?,
+                );
+            }
+            if type_changed {
+                result = Some(
+                    execute(
+                        session,
+                        &format!(
+                            "ALTER TABLE {qualified} ALTER COLUMN {target} TYPE {data_type}"
+                        ),
+                    )
+                    .await?,
+                );
+            }
+            if default_changed {
+                let sql = match &provided_default {
+                    Some(value) => format!(
+                        "ALTER TABLE {qualified} ALTER COLUMN {target} SET DEFAULT {value}"
+                    ),
+                    None => format!(
+                        "ALTER TABLE {qualified} ALTER COLUMN {target} DROP DEFAULT"
+                    ),
+                };
+                result = Some(execute(session, &sql).await?);
+            }
+            if null_changed {
+                let action = if edit.nullable {
+                    "DROP NOT NULL"
+                } else {
+                    "SET NOT NULL"
+                };
+                result = Some(
+                    execute(
+                        session,
+                        &format!(
+                            "ALTER TABLE {qualified} ALTER COLUMN {target} {action}"
+                        ),
+                    )
+                    .await?,
+                );
+            }
+            result.ok_or_else(|| "There are no changes to save.".to_string())
+        }
+        DbKind::Mysql => {
+            if renamed && !type_changed && !null_changed && !default_changed {
+                let sql = format!(
+                    "ALTER TABLE {qualified} RENAME COLUMN {} TO {target}",
+                    quote_ident(name, session.kind)
+                );
+                return execute(session, &sql).await;
+            }
+
+            let mut definition = format!("{target} {data_type}");
+            definition.push_str(if edit.nullable { " NULL" } else { " NOT NULL" });
+            if let Some(default) = &provided_default {
+                definition.push_str(" DEFAULT ");
+                definition.push_str(default);
+            }
+            if current.auto_increment {
+                definition.push_str(" AUTO_INCREMENT");
+            }
+            let sql = format!(
+                "ALTER TABLE {qualified} CHANGE COLUMN {} {definition}",
+                quote_ident(name, session.kind)
+            );
+            execute(session, &sql).await
+        }
+    }
+}
+
 pub async fn drop_column(
     session: &Session,
     schema: &str,
@@ -886,6 +1151,66 @@ pub async fn drop_column(
         quote_ident(column.trim(), session.kind)
     );
     execute(session, &sql).await
+}
+
+pub async fn create_schema(
+    session: &Session,
+    database: &str,
+    name: &str,
+) -> Result<QueryResult, String> {
+    let name = name.trim();
+    let database = database.trim();
+    if name.is_empty() {
+        return Err("Schema name is required.".to_string());
+    }
+    if database.is_empty() || database == session.database {
+        let sql = format!("CREATE SCHEMA {}", quote_ident(name, session.kind));
+        return execute(session, &sql).await;
+    }
+    if session.kind != DbKind::Postgres {
+        return Err("Schemas can only be created in the connected MySQL/MariaDB database.".to_string());
+    }
+
+    let mut target = session.target.clone();
+    target.database = database.to_string();
+    let url = connection_url(&target, &session.password)?;
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(12))
+        .connect(&url)
+        .await
+        .map_err(|e| format!("Could not connect to database \"{database}\": {e}"))?;
+    let temp = Session {
+        profile_id: session.profile_id.clone(),
+        kind: session.kind,
+        database: database.to_string(),
+        server_version: session.server_version.clone(),
+        pool: DbPool::Postgres(pool),
+        target,
+        password: session.password.clone(),
+        _tunnel: session._tunnel.clone(),
+    };
+    let sql = format!("CREATE SCHEMA {}", quote_ident(name, session.kind));
+    let result = execute(&temp, &sql).await;
+    temp.pool.close().await;
+    result
+}
+
+pub async fn drop_schema(session: &Session, schema: &str) -> Result<QueryResult, String> {
+    let schema = schema.trim();
+    if schema.is_empty() {
+        return Err("Schema name is required.".to_string());
+    }
+    match session.kind {
+        DbKind::Postgres => {
+            let sql = format!(
+                "DROP SCHEMA {} CASCADE",
+                quote_ident(schema, session.kind)
+            );
+            execute(session, &sql).await
+        }
+        DbKind::Mysql => drop_database(session, schema).await,
+    }
 }
 
 pub async fn create_database(session: &Session, name: &str) -> Result<QueryResult, String> {
@@ -1147,7 +1472,10 @@ fn pg_cell(row: &PgRow, index: usize) -> Value {
     try_cell!(NaiveDateTime, |v: NaiveDateTime| json!(v.to_string()));
     try_cell!(NaiveDate, |v: NaiveDate| json!(v.to_string()));
     try_cell!(NaiveTime, |v: NaiveTime| json!(v.to_string()));
-    try_cell!(DateTime<Utc>, |v: DateTime<Utc>| json!(v.to_rfc3339()));
+    try_cell!(DateTime<Utc>, |v: DateTime<Utc>| json!(v
+        .with_timezone(&Local)
+        .naive_local()
+        .to_string()));
     try_cell!(Uuid, |v: Uuid| json!(v.to_string()));
     try_cell!(Json<Value>, |v: Json<Value>| v.0);
 
@@ -1182,6 +1510,10 @@ fn mysql_cell(row: &MySqlRow, index: usize) -> Value {
     try_cell!(NaiveDateTime, |v: NaiveDateTime| json!(v.to_string()));
     try_cell!(NaiveDate, |v: NaiveDate| json!(v.to_string()));
     try_cell!(NaiveTime, |v: NaiveTime| json!(v.to_string()));
+    try_cell!(DateTime<Utc>, |v: DateTime<Utc>| json!(v
+        .with_timezone(&Local)
+        .naive_local()
+        .to_string()));
     try_cell!(Uuid, |v: Uuid| json!(v.to_string()));
 
     unsupported_value(row, index)
