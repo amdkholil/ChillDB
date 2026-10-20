@@ -6,6 +6,8 @@ ChillDB is a small, fast desktop SQL client for PostgreSQL and MySQL/MariaDB.
 It is built with Tauri 2, Rust, vanilla TypeScript, and Vite, with no frontend
 framework and no ORM.
 
+![ChillDB screenshot](docs/screenshot.png)
+
 ## Features
 
 - Connect to PostgreSQL and MySQL/MariaDB, including optional SSH tunnels.
