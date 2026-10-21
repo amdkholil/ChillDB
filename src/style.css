@@ -1082,6 +1082,22 @@ table.grid tbody tr:hover td.rownum {
   margin: 0;
   color: var(--muted);
   line-height: 1.55;
+  white-space: pre-wrap;
+}
+.update-progress {
+  height: 7px;
+  margin-top: 16px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: #0b0e13;
+  border: 1px solid var(--border-soft);
+}
+.update-progress span {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: var(--accent);
+  transition: width 150ms ease;
 }
 
 .history-modal {

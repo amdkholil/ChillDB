@@ -58,6 +58,7 @@ export function confirmDialog(
   title: string,
   message: string,
   confirmLabel = "Delete",
+  danger = true,
 ): Promise<boolean> {
   return new Promise((resolve) => {
     const backdrop = openModal(`
@@ -72,7 +73,7 @@ export function confirmDialog(
         <div class="modal-foot">
           <button type="button" class="btn ghost" data-confirm="no">Cancel</button>
           <span class="spacer"></span>
-          <button type="button" class="btn danger" data-confirm="yes">${esc(confirmLabel)}</button>
+          <button type="button" class="btn ${danger ? "danger" : "primary"}" data-confirm="yes">${esc(confirmLabel)}</button>
         </div>
       </div>
     `);

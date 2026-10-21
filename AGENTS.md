@@ -72,6 +72,20 @@ no passwords.
 - Do not commit generated output: `dist/`, `node_modules/`, `src-tauri/target/`,
   or `src-tauri/gen/`.
 
+## Updater
+
+The updater uses `tauri-plugin-updater` with signed artifacts. The public key
+lives in `src-tauri/tauri.conf.json`; the private key and its password are only
+stored in the `TAURI_SIGNING_PRIVATE_KEY` and
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` GitHub Actions secrets. Never commit or log
+either value. The local backup is `~/.config/chilldb/updater.key` with mode
+`0600`; losing it prevents updates for existing installs.
+
+Linux in-app updates only work for the AppImage build. `.deb` and `.rpm` users
+must install newer releases manually. The updater endpoint is GitHub's
+`releases/latest/download/latest.json`, so a release must be published before
+clients can see it.
+
 ## Security Rules
 
 - Never write database passwords, SSH passwords, or key passphrases to profile
@@ -144,6 +158,8 @@ version and release again.
   rename/drop backend commands are not exposed in the UI yet.
 - MySQL/MariaDB cannot rename a database; the backend returns an explicit error.
 - PostgreSQL custom types, arrays, and intervals are displayed as `<TYPE>`.
+- Automatic updates on Linux only support the AppImage build; `.deb` and
+  `.rpm` installs require manual replacement.
 - Table previews are paginated and ordered by primary key when one exists.
 - Views are read-only in the table UI.
 - The SQL runner executes a single statement per run.

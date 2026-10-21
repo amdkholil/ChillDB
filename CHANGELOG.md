@@ -7,6 +7,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-21
+
+### Added
+
+- Automatic update checks on startup and a manual **Updates** button, with
+  signed downloads, progress feedback, and relaunch after installing.
+
+### Security
+
+- Update artifacts are signed with a Tauri minisign key. The private key is
+  stored only in GitHub Actions secrets.
+
 ## [0.3.0] - 2026-10-20
 
 ### Added

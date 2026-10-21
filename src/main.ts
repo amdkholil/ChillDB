@@ -1,6 +1,9 @@
 import "./style.css";
 import { api, errorMessage, reportError } from "./api";
 import { icons } from "./icons";
+import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
+
 import { closeModal, confirmDialog, esc, fmtMs, openModal, spinner, toast } from "./ui";
 import type {
   CellInput,
@@ -88,6 +91,95 @@ function pushHistory(entry: HistoryEntry): void {
   }
 }
 
+/* ----------------------------------------------------------------- updates */
+
+let updateCheckBusy = false;
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function checkForUpdates(manual = false): Promise<void> {
+  if (updateCheckBusy) return;
+  if (!manual && document.querySelector(".modal-backdrop")) return;
+  updateCheckBusy = true;
+
+  try {
+    const update = await check({ timeout: 15000 });
+    if (!update) {
+      if (manual) toast("ChillDB is up to date", "success");
+      return;
+    }
+
+    const notes = update.body?.trim();
+    const message = [
+      `ChillDB ${update.version} is available (you have ${update.currentVersion}).`,
+      notes ? `\n\n${notes}` : "",
+      "\n\nDownload and install it now? ChillDB will restart.",
+    ].join("");
+    const confirmed = await confirmDialog(
+      "Update available",
+      message,
+      "Install update",
+      false,
+    );
+    if (!confirmed) {
+      await update.close();
+      return;
+    }
+
+    const backdrop = openModal(`
+      <div class="modal small">
+        <div class="modal-head">
+          <h2>Installing ChillDB ${esc(update.version)}</h2>
+        </div>
+        <div class="modal-body">
+          <p class="confirm-text" id="update-status">Downloading update…</p>
+          <div class="update-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+            <span id="update-progress-bar"></span>
+          </div>
+        </div>
+      </div>
+    `);
+    backdrop.removeAttribute("data-close");
+    const status = byId<HTMLParagraphElement>("update-status");
+    const bar = byId<HTMLSpanElement>("update-progress-bar");
+    let downloaded = 0;
+    let total = 0;
+
+    await update.downloadAndInstall((event) => {
+      if (event.event === "Started") {
+        total = event.data.contentLength ?? 0;
+        if (status && total > 0) {
+          status.textContent = `Downloading ${formatBytes(total)}…`;
+        }
+      } else if (event.event === "Progress") {
+        downloaded += event.data.chunkLength;
+        if (status && total > 0) {
+          const percent = Math.min(100, Math.round((downloaded / total) * 100));
+          status.textContent = `Downloading update… ${percent}%`;
+          if (bar) bar.style.width = `${percent}%`;
+        }
+      } else if (event.event === "Finished") {
+        if (status) status.textContent = "Installing update and restarting…";
+        if (bar) bar.style.width = "100%";
+      }
+    });
+
+    await relaunch();
+  } catch (error) {
+    closeModal();
+    if (manual) {
+      toast(errorMessage(error), "error");
+    } else {
+      console.warn("Update check failed:", error);
+    }
+  } finally {
+    updateCheckBusy = false;
+  }
+}
+
 /* ------------------------------------------------------------------ shell */
 
 function renderShell(): void {
@@ -102,6 +194,7 @@ function renderShell(): void {
           </span>
         </div>
         <span class="spacer"></span>
+        <button class="btn ghost" data-action="check-updates" title="Check for updates">${icons.refresh} Updates</button>
         <button class="btn ghost" data-action="history">${icons.history} History</button>
         <button class="btn ghost" data-action="new-query">${icons.terminal} New query</button>
         <button class="btn primary" data-action="add-connection">${icons.plus} New connection</button>
@@ -3533,6 +3626,9 @@ document.addEventListener("click", (event) => {
     case "add-connection":
       openConnectionModal();
       break;
+    case "check-updates":
+      void checkForUpdates(true);
+      break;
     case "history":
       openHistoryModal();
       break;
@@ -3656,6 +3752,7 @@ async function init(): Promise<void> {
     toast(errorMessage(error), "error");
   }
   renderSidebar();
+  window.setTimeout(() => void checkForUpdates(), 5000);
 }
 
 void init();
