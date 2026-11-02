@@ -97,6 +97,21 @@ pub struct QueryResult {
     pub statement: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SortColumn {
+    pub column: String,
+    pub desc: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilterCondition {
+    pub column: String,
+    pub op: String,
+    pub value: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableColumn {
@@ -599,16 +614,27 @@ async fn primary_keys(
     }
 }
 
-async fn count_rows(session: &Session, qualified: &str) -> Result<u64, String> {
-    let sql = format!("SELECT COUNT(*) FROM {qualified}");
+async fn count_rows(
+    session: &Session,
+    qualified: &str,
+    where_clause: &str,
+) -> Result<u64, String> {
+    let where_part = if where_clause.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {where_clause}")
+    };
     match &session.pool {
-        DbPool::Postgres(pool) => sqlx::query_scalar::<_, i64>(&sql)
-            .fetch_one(pool)
-            .await
-            .map(|n| n as u64)
-            .map_err(|e| e.to_string()),
+        DbPool::Postgres(pool) => {
+            let sql = format!("SELECT COUNT(*) FROM {qualified}{where_part}");
+            sqlx::query_scalar::<_, i64>(&sql)
+                .fetch_one(pool)
+                .await
+                .map(|n| n as u64)
+                .map_err(|e| e.to_string())
+        }
         DbPool::Mysql(pool) => {
-            let sql = format!("SELECT CAST(COUNT(*) AS SIGNED) FROM {qualified}");
+            let sql = format!("SELECT CAST(COUNT(*) AS SIGNED) FROM {qualified}{where_part}");
             sqlx::query_scalar::<_, i64>(&sql)
                 .fetch_one(pool)
                 .await
@@ -624,27 +650,124 @@ pub async fn table_page(
     table: &str,
     page: i64,
     page_size: i64,
+    sort: &[SortColumn],
+    filters: &[FilterCondition],
+    search: Option<&str>,
 ) -> Result<QueryResult, String> {
     let page = page.max(1);
     let page_size = page_size.clamp(1, 2000);
     let offset = (page - 1).saturating_mul(page_size);
     let qualified = qualified_name(schema, table, session.kind);
 
-    let keys = primary_keys(session, schema, table).await?;
-    let order = if keys.is_empty() {
+    let mut where_parts: Vec<String> = Vec::new();
+
+    // 1. Where builder filters
+    for f in filters {
+        let col = quote_ident(&f.column, session.kind);
+        let part = match f.op.to_uppercase().as_str() {
+            "=" | "!=" | "<>" | "<" | "<=" | ">" | ">=" => {
+                let val = sql_literal(&f.value, session.kind);
+                format!("{col} {} {val}", f.op)
+            }
+            "LIKE" => {
+                let pattern = format!("%{}%", f.value);
+                let val = sql_literal(&pattern, session.kind);
+                format!("{col} LIKE {val}")
+            }
+            "ILIKE" => {
+                let pattern = format!("%{}%", f.value);
+                let val = sql_literal(&pattern, session.kind);
+                match session.kind {
+                    DbKind::Postgres => format!("{col} ILIKE {val}"),
+                    DbKind::Mysql => format!("LOWER({col}) LIKE LOWER({val})"),
+                }
+            }
+            "STARTS_WITH" => {
+                let pattern = format!("{}%", f.value);
+                let val = sql_literal(&pattern, session.kind);
+                format!("{col} LIKE {val}")
+            }
+            "ENDS_WITH" => {
+                let pattern = format!("%{}", f.value);
+                let val = sql_literal(&pattern, session.kind);
+                format!("{col} LIKE {val}")
+            }
+            "IS NULL" => format!("{col} IS NULL"),
+            "IS NOT NULL" => format!("{col} IS NOT NULL"),
+            _ => continue,
+        };
+        where_parts.push(part);
+    }
+
+    // 2. Quick search across text/varchar/char/string columns
+    if let Some(query) = search.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        let table_cols = describe_table(session, schema, table).await.unwrap_or_default();
+        let pattern = format!("%{query}%");
+        let val = sql_literal(&pattern, session.kind);
+        let mut search_col_parts = Vec::new();
+
+        for col in &table_cols {
+            let t = col.type_name.to_lowercase();
+            let is_textual = t.contains("char")
+                || t.contains("text")
+                || t.contains("json")
+                || t == "uuid"
+                || t == "name";
+            if is_textual {
+                let quoted_col = quote_ident(&col.name, session.kind);
+                match session.kind {
+                    DbKind::Postgres => search_col_parts.push(format!("{quoted_col}::text ILIKE {val}")),
+                    DbKind::Mysql => search_col_parts.push(format!("LOWER(CAST({quoted_col} AS CHAR)) LIKE LOWER({val})")),
+                }
+            }
+        }
+
+        if !search_col_parts.is_empty() {
+            where_parts.push(format!("({})", search_col_parts.join(" OR ")));
+        }
+    }
+
+    let where_clause = if where_parts.is_empty() {
         String::new()
     } else {
-        let columns = keys
-            .iter()
-            .map(|key| quote_ident(key, session.kind))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!(" ORDER BY {columns}")
+        where_parts.join(" AND ")
     };
 
-    let sql = format!("SELECT * FROM {qualified}{order} LIMIT {page_size} OFFSET {offset}");
+    let where_sql = if where_clause.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {where_clause}")
+    };
+
+    // 3. Sorting
+    let order = if !sort.is_empty() {
+        let clauses = sort
+            .iter()
+            .map(|s| {
+                let col = quote_ident(&s.column, session.kind);
+                let dir = if s.desc { "DESC" } else { "ASC" };
+                format!("{col} {dir}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(" ORDER BY {clauses}")
+    } else {
+        let keys = primary_keys(session, schema, table).await?;
+        if keys.is_empty() {
+            String::new()
+        } else {
+            let columns = keys
+                .iter()
+                .map(|key| quote_ident(key, session.kind))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(" ORDER BY {columns}")
+        }
+    };
+
+    let sql = format!("SELECT * FROM {qualified}{where_sql}{order} LIMIT {page_size} OFFSET {offset}");
     let mut result = execute(session, &sql).await?;
-    result.total_rows = Some(count_rows(session, &qualified).await?);
+    result.total_rows = Some(count_rows(session, &qualified, &where_clause).await?);
     Ok(result)
 }
 

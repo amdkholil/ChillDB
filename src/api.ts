@@ -3,11 +3,13 @@ import type {
   CellInput,
   DbKind,
   EditColumn,
+  FilterCondition,
   NewColumn,
   Profile,
   QueryResult,
   SavedCredentials,
   SessionInfo,
+  SortColumn,
   TableColumn,
   TableInfo,
 } from "./types";
@@ -132,8 +134,20 @@ export const api = {
     table: string,
     page: number,
     pageSize: number,
+    sort?: SortColumn[],
+    filters?: FilterCondition[],
+    search?: string,
   ): Promise<QueryResult> {
-    return invoke("table_page", { connectionId, schema, table, page, pageSize });
+    return invoke("table_page", {
+      connectionId,
+      schema,
+      table,
+      page,
+      pageSize,
+      sort,
+      filters,
+      search,
+    });
   },
 
   insertRow(

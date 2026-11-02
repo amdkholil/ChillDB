@@ -327,15 +327,23 @@ async fn table_page(
     table: String,
     page: i64,
     page_size: i64,
+    sort: Option<Vec<db::SortColumn>>,
+    filters: Option<Vec<db::FilterCondition>>,
+    search: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<QueryResult, String> {
     let session = get_session(&state, &connection_id)?;
+    let sort_cols = sort.unwrap_or_default();
+    let filter_list = filters.unwrap_or_default();
     timed(db::table_page(
         &session,
         &schema,
         &table,
         page,
         page_size,
+        &sort_cols,
+        &filter_list,
+        search.as_deref(),
     ))
     .await
 }

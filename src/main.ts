@@ -17,6 +17,7 @@ import type {
   Profile,
   QueryTab,
   QueryResult,
+  SortColumn,
   StructureTab,
   TableColumn,
   TableTab,
@@ -357,7 +358,6 @@ function profileRow(profile: Profile): string {
       <div class="conn-row">
         <button class="conn-main" data-action="toggle-profile" data-id="${esc(profile.id)}">
           <span class="chev ${expanded ? "open" : ""}">${icons.chevron}</span>
-          <span class="db-badge ${profile.kind}">${profile.kind === "postgres" ? "PG" : "MY"}</span>
           <span class="conn-text">
             <span class="conn-name">${esc(profile.name)}</span>
             <span class="conn-meta">${esc(profile.host)}:${profile.port}${profile.database ? ` · ${esc(profile.database)}` : ""}</span>
@@ -412,6 +412,7 @@ function schemasSectionHtml(
     <div class="tree-caption">
       <span>${schemas.length} ${label}${schemas.length > 1 ? "s" : ""}</span>
       <span class="spacer"></span>
+      <button class="icon-btn tiny" title="Refresh ${label}s" data-action="refresh-schemas" data-id="${esc(profile.id)}">${icons.refresh}</button>
       ${
         profile.kind === "mysql"
           ? `<button class="icon-btn tiny" title="New database" data-action="create-database" data-id="${esc(profile.id)}">${icons.plus}</button>`
@@ -429,6 +430,7 @@ function schemasSectionHtml(
                 <span class="tree-icon">${icons.folder}</span>
                 <span class="tree-name">${esc(schema)}</span>
               </button>
+              <button class="icon-btn tiny" title="Refresh tables in ${esc(schema)}" data-action="refresh-tables" data-id="${esc(profile.id)}" data-schema="${esc(schema)}">${icons.refresh}</button>
               <button class="icon-btn tiny" title="New table" data-action="create-table" data-id="${esc(profile.id)}" data-schema="${esc(schema)}">${icons.plus}</button>
             </div>
             ${open ? tablesHtml(profile, conn, schema) : ""}
@@ -454,6 +456,7 @@ function databasesHtml(
       <div class="tree-caption">
         <span>${databases.length} database${databases.length === 1 ? "" : "s"}</span>
         <span class="spacer"></span>
+        <button class="icon-btn tiny" title="Refresh databases" data-action="refresh-databases" data-id="${esc(conn.profile.id)}">${icons.refresh}</button>
         <button class="icon-btn tiny" title="New database" data-action="create-database" data-id="${esc(conn.profile.id)}">${icons.plus}</button>
       </div>
       ${databases
@@ -638,10 +641,74 @@ function renderQueryTab(ws: HTMLDivElement, tab: QueryTab): void {
   editor?.focus();
 }
 
+function filterBarHtml(tab: TableTab): string {
+  if (!tab.filterOpen) return "";
+  const cols = tab.columns ?? [];
+  const rows = tab.filters
+    .map(
+      (f, i) => `
+      <div class="filter-row" data-filter-index="${i}">
+        <select class="select small filter-col" data-idx="${i}">
+          ${cols
+            .map(
+              (c) =>
+                `<option value="${esc(c.name)}" ${c.name === f.column ? "selected" : ""}>${esc(c.name)}</option>`,
+            )
+            .join("")}
+        </select>
+        <select class="select small filter-op" data-idx="${i}">
+          ${[
+            { op: "=", label: "=" },
+            { op: "!=", label: "!=" },
+            { op: "<", label: "<" },
+            { op: "<=", label: "<=" },
+            { op: ">", label: ">" },
+            { op: ">=", label: ">=" },
+            { op: "LIKE", label: "contains" },
+            { op: "ILIKE", label: "ilike" },
+            { op: "STARTS_WITH", label: "starts with" },
+            { op: "ENDS_WITH", label: "ends with" },
+            { op: "IS NULL", label: "is null" },
+            { op: "IS NOT NULL", label: "is not null" },
+          ]
+            .map(
+              (o) =>
+                `<option value="${o.op}" ${o.op === f.op ? "selected" : ""}>${o.label}</option>`,
+            )
+            .join("")}
+        </select>
+        ${
+          f.op === "IS NULL" || f.op === "IS NOT NULL"
+            ? `<input class="filter-val" disabled value="" style="visibility:hidden;width:120px;" />`
+            : `<input class="filter-val" data-idx="${i}" placeholder="value" value="${esc(f.value)}" autocomplete="off" />`
+        }
+        <button type="button" class="icon-btn small filter-del" data-idx="${i}" title="Remove filter">${icons.x}</button>
+      </div>
+    `,
+    )
+    .join("");
+
+  return `
+    <div class="filter-bar">
+      <div class="filter-bar-header">
+        <span class="filter-title">WHERE Filters</span>
+        <button type="button" class="btn ghost small" id="btn-add-filter">${icons.plus} Add condition</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn primary small" id="btn-apply-filters">Apply</button>
+        <button type="button" class="btn ghost small" id="btn-clear-filters">Clear all</button>
+      </div>
+      <div class="filter-rows-list">
+        ${rows.length === 0 ? `<div class="filter-empty">No filters applied. Click "Add condition" to filter rows.</div>` : rows}
+      </div>
+    </div>
+  `;
+}
+
 function renderTableTab(ws: HTMLDivElement, tab: TableTab): void {
   const conn = conns.get(tab.profileId);
   const kind = conn?.profile.kind ?? "postgres";
   const editable = !tab.isView;
+  const hasFilterActive = tab.filters.length > 0;
 
   ws.innerHTML = `
     <div class="view">
@@ -649,6 +716,27 @@ function renderTableTab(ws: HTMLDivElement, tab: TableTab): void {
         <span class="view-label">${icons.table}
           <span class="crumb">${esc(tab.schema)}</span>.<strong>${esc(tab.table)}</strong>
         </span>
+        <div class="table-quick-search-wrap">
+          <span class="search-icon">${icons.search}</span>
+          <input
+            id="table-data-search"
+            class="table-data-search"
+            type="text"
+            placeholder="Quick search data…"
+            value="${esc(tab.search)}"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          ${
+            tab.search
+              ? `<button type="button" class="icon-btn small clear-search-btn" id="btn-clear-search">${icons.x}</button>`
+              : ""
+          }
+        </div>
+        <button class="btn ${tab.filterOpen || hasFilterActive ? "active" : ""}" id="btn-toggle-filter" title="Filter builder">
+          ${icons.filter} Filter${hasFilterActive ? ` (${tab.filters.length})` : ""}
+        </button>
+        ${tab.sort.length > 0 ? `<button class="btn ghost small" id="btn-clear-sort" title="Clear sorting">Reset Sort (${tab.sort.length})</button>` : ""}
         <span class="spacer"></span>
         ${
           editable
@@ -661,6 +749,7 @@ function renderTableTab(ws: HTMLDivElement, tab: TableTab): void {
         }
         <button class="btn" id="btn-refresh" data-action="refresh-table">${icons.refresh} Refresh</button>
       </div>
+      <div class="table-filter-container" id="table-filter-container">${filterBarHtml(tab)}</div>
       <div class="result-panel" id="result-panel">${resultPanelHtml(tab)}</div>
       <div class="table-bar">
         <span id="table-count" class="table-count"></span>
@@ -680,6 +769,46 @@ function renderTableTab(ws: HTMLDivElement, tab: TableTab): void {
       </div>
     </div>
   `;
+
+  // Quick search input handler
+  let searchTimer: number | undefined;
+  const searchInput = byId<HTMLInputElement>("table-data-search");
+  searchInput?.addEventListener("input", (e) => {
+    const val = (e.target as HTMLInputElement).value;
+    tab.search = val;
+    window.clearTimeout(searchTimer);
+    searchTimer = window.setTimeout(() => {
+      tab.page = 1;
+      tab.selectedRow = null;
+      void loadPreview(tab);
+    }, 350);
+  });
+
+  byId<HTMLButtonElement>("btn-clear-search")?.addEventListener("click", () => {
+    tab.search = "";
+    tab.page = 1;
+    tab.selectedRow = null;
+    void loadPreview(tab);
+    renderWorkspace();
+  });
+
+  // Filter toggle handler
+  byId<HTMLButtonElement>("btn-toggle-filter")?.addEventListener("click", () => {
+    tab.filterOpen = !tab.filterOpen;
+    const container = byId<HTMLDivElement>("table-filter-container");
+    if (container) container.innerHTML = filterBarHtml(tab);
+    attachFilterEvents(tab);
+  });
+
+  byId<HTMLButtonElement>("btn-clear-sort")?.addEventListener("click", () => {
+    tab.sort = [];
+    tab.page = 1;
+    tab.selectedRow = null;
+    void loadPreview(tab);
+    renderWorkspace();
+  });
+
+  attachFilterEvents(tab);
 
   byId<HTMLButtonElement>("btn-refresh")?.addEventListener("click", () => {
     tab.selectedRow = null;
@@ -711,6 +840,69 @@ function renderTableTab(ws: HTMLDivElement, tab: TableTab): void {
   });
 
   updateTableToolbar(tab);
+}
+
+function attachFilterEvents(tab: TableTab): void {
+  const container = byId<HTMLDivElement>("table-filter-container");
+  if (!container || !tab.filterOpen) return;
+
+  byId<HTMLButtonElement>("btn-add-filter")?.addEventListener("click", () => {
+    const firstCol = tab.columns?.[0]?.name ?? tab.result?.columns?.[0]?.name ?? "";
+    tab.filters.push({ column: firstCol, op: "=", value: "" });
+    container.innerHTML = filterBarHtml(tab);
+    attachFilterEvents(tab);
+  });
+
+  byId<HTMLButtonElement>("btn-apply-filters")?.addEventListener("click", () => {
+    // Read current input values
+    container.querySelectorAll<HTMLDivElement>(".filter-row").forEach((row) => {
+      const idx = Number(row.dataset.filterIndex);
+      if (Number.isFinite(idx) && tab.filters[idx]) {
+        const colEl = row.querySelector<HTMLSelectElement>(".filter-col");
+        const opEl = row.querySelector<HTMLSelectElement>(".filter-op");
+        const valEl = row.querySelector<HTMLInputElement>(".filter-val");
+        if (colEl) tab.filters[idx].column = colEl.value;
+        if (opEl) tab.filters[idx].op = opEl.value;
+        if (valEl) tab.filters[idx].value = valEl.value;
+      }
+    });
+    tab.page = 1;
+    tab.selectedRow = null;
+    void loadPreview(tab);
+    renderWorkspace();
+  });
+
+  byId<HTMLButtonElement>("btn-clear-filters")?.addEventListener("click", () => {
+    tab.filters = [];
+    tab.page = 1;
+    tab.selectedRow = null;
+    void loadPreview(tab);
+    renderWorkspace();
+  });
+
+  container.querySelectorAll<HTMLSelectElement>(".filter-op").forEach((select) => {
+    select.addEventListener("change", (e) => {
+      const el = e.target as HTMLSelectElement;
+      const idx = Number(el.dataset.idx);
+      if (Number.isFinite(idx) && tab.filters[idx]) {
+        tab.filters[idx].op = el.value;
+        container.innerHTML = filterBarHtml(tab);
+        attachFilterEvents(tab);
+      }
+    });
+  });
+
+  container.querySelectorAll<HTMLButtonElement>(".filter-del").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      const el = (e.currentTarget as HTMLElement);
+      const idx = Number(el.dataset.idx);
+      if (Number.isFinite(idx)) {
+        tab.filters.splice(idx, 1);
+        container.innerHTML = filterBarHtml(tab);
+        attachFilterEvents(tab);
+      }
+    });
+  });
 }
 
 function pageCount(tab: TableTab): number {
@@ -1762,6 +1954,7 @@ function resultPanelHtml(tab: QueryTab | TableTab): string {
       tab.result,
       tab.selectedRow,
       (tab.page - 1) * tab.pageSize,
+      tab.sort,
     );
   }
   return gridHtml(tab.result, null);
@@ -1771,6 +1964,7 @@ function gridHtml(
   result: QueryResult,
   selectedRow: number | null,
   rowOffset = 0,
+  sortList: SortColumn[] = [],
 ): string {
   const affected = result.rowsAffected;
   const meta = `
@@ -1790,10 +1984,16 @@ function gridHtml(
   }
 
   const head = result.columns
-    .map(
-      (column) =>
-        `<th><span class="col-name">${esc(column.name)}</span><span class="col-type">${esc(column.typeName)}</span></th>`,
-    )
+    .map((column) => {
+      const sortIdx = sortList.findIndex((s) => s.column === column.name);
+      let sortIndicator = "";
+      if (sortIdx !== -1) {
+        const s = sortList[sortIdx];
+        const badge = sortList.length > 1 ? `<span class="sort-badge">${sortIdx + 1}</span>` : "";
+        sortIndicator = `<span class="sort-icon ${s.desc ? "desc" : "asc"}">${s.desc ? icons.sortDesc : icons.sortAsc}${badge}</span>`;
+      }
+      return `<th class="sortable-th" data-col-name="${esc(column.name)}"><div class="th-content"><div class="th-titles"><span class="col-name">${esc(column.name)}</span><span class="col-type">${esc(column.typeName)}</span></div>${sortIndicator}</div></th>`;
+    })
     .join("");
 
   const body = result.rows
@@ -1926,12 +2126,25 @@ async function loadPreview(tab: TableTab): Promise<void> {
   updateTableToolbar(tab);
 
   try {
+    if (!tab.columns) {
+      void api.describeTable(tab.connectionId, tab.schema, tab.table).then((cols) => {
+        tab.columns = cols;
+        const container = byId<HTMLDivElement>("table-filter-container");
+        if (container && tab.filterOpen) {
+          container.innerHTML = filterBarHtml(tab);
+          attachFilterEvents(tab);
+        }
+      }).catch(() => undefined);
+    }
     tab.result = await api.tablePage(
       tab.connectionId,
       tab.schema,
       tab.table,
       tab.page,
       tab.pageSize,
+      tab.sort,
+      tab.filters,
+      tab.search,
     );
     const totalPages = pageCount(tab);
     if (tab.page > totalPages) {
@@ -1942,6 +2155,9 @@ async function loadPreview(tab: TableTab): Promise<void> {
         tab.table,
         tab.page,
         tab.pageSize,
+        tab.sort,
+        tab.filters,
+        tab.search,
       );
     }
   } catch (error) {
@@ -2521,6 +2737,10 @@ function openTableTab(
     page: 1,
     pageSize: 200,
     selectedRow: null,
+    sort: [],
+    filters: [],
+    search: "",
+    filterOpen: false,
     loading: false,
   };
   tabs.push(tab);
@@ -2792,10 +3012,14 @@ async function loadDatabases(profileId: string): Promise<void> {
   }
 }
 
-async function loadTables(profileId: string, schema: string): Promise<void> {
+async function loadTables(
+  profileId: string,
+  schema: string,
+  force = false,
+): Promise<void> {
   const conn = conns.get(profileId);
   if (!conn || conn.loadingTables.has(schema)) return;
-  if (conn.tables[schema]) return;
+  if (!force && conn.tables[schema]) return;
   conn.loadingTables.add(schema);
   renderSidebar();
   try {
@@ -3601,6 +3825,42 @@ document.addEventListener("click", (event) => {
   if (!target.closest(".sidebar-search")) hideTableSearch();
 
   const current = activeTab();
+
+  const sortTh = target.closest<HTMLElement>("th.sortable-th");
+  if (current?.type === "table" && sortTh) {
+    const colName = sortTh.dataset.colName;
+    if (colName) {
+      const isMulti = event.shiftKey || event.ctrlKey || event.metaKey;
+      const existingIdx = current.sort.findIndex((s) => s.column === colName);
+      if (isMulti) {
+        if (existingIdx !== -1) {
+          if (!current.sort[existingIdx].desc) {
+            current.sort[existingIdx].desc = true;
+          } else {
+            current.sort.splice(existingIdx, 1);
+          }
+        } else {
+          current.sort.push({ column: colName, desc: false });
+        }
+      } else {
+        if (existingIdx !== -1) {
+          if (!current.sort[existingIdx].desc) {
+            current.sort = [{ column: colName, desc: true }];
+          } else {
+            current.sort = [];
+          }
+        } else {
+          current.sort = [{ column: colName, desc: false }];
+        }
+      }
+      current.page = 1;
+      current.selectedRow = null;
+      void loadPreview(current);
+      renderWorkspace();
+    }
+    return;
+  }
+
   const rowEl = target.closest<HTMLElement>("tr[data-row-index]");
 
   if (current?.type === "table" && rowEl) {
@@ -3697,6 +3957,19 @@ document.addEventListener("click", (event) => {
     }
     case "create-schema": {
       openCreateSchemaModal(id, actionEl.dataset.database ?? "");
+      break;
+    }
+    case "refresh-databases": {
+      void loadDatabases(id);
+      break;
+    }
+    case "refresh-schemas": {
+      void loadSchemas(id);
+      break;
+    }
+    case "refresh-tables": {
+      const schema = actionEl.dataset.schema ?? "";
+      if (schema) void loadTables(id, schema, true);
       break;
     }
     case "create-database": {
