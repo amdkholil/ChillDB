@@ -8,10 +8,14 @@ import { closeModal, confirmDialog, esc, fmtMs, openModal, spinner, toast } from
 import type {
   CellInput,
   ConnectionState,
+  CreateConstraintInput,
+  CreateIndexInput,
   CreateTableColumn,
   CreateTableTab,
   DbKind,
   EditColumn,
+  FilterCondition,
+  ForeignKeyRef,
   HistoryEntry,
   NewColumn,
   Profile,
@@ -190,7 +194,10 @@ function renderShell(): void {
         <div class="brand">
           <span class="brand-mark">${icons.database}</span>
           <span class="brand-text">
-            <strong>ChillDB</strong>
+            <span class="brand-title">
+              <strong>ChillDB</strong>
+              <span class="version-badge">v${__APP_VERSION__}</span>
+            </span>
             <small>PostgreSQL · MySQL · MariaDB</small>
           </span>
         </div>
@@ -359,7 +366,11 @@ function profileRow(profile: Profile): string {
         <button class="conn-main" data-action="toggle-profile" data-id="${esc(profile.id)}">
           <span class="chev ${expanded ? "open" : ""}">${icons.chevron}</span>
           <span class="conn-text">
-            <span class="conn-name">${esc(profile.name)}</span>
+            <span class="conn-name">
+              ${esc(profile.name)}
+              ${profile.ssl || profile.sslMode && profile.sslMode !== "disable" ? `<span class="badge-tag ssl" title="SSL/TLS enabled">${icons.shield} SSL</span>` : ""}
+              ${profile.readOnly ? `<span class="badge-tag readonly" title="Read-only mode">${icons.lock} RO</span>` : ""}
+            </span>
             <span class="conn-meta">${esc(profile.host)}:${profile.port}${profile.database ? ` · ${esc(profile.database)}` : ""}</span>
           </span>
           ${connected ? '<span class="status-dot" title="Connected"></span>' : ""}
@@ -498,29 +509,122 @@ function tablesHtml(
   schema: string,
 ): string {
   if (conn.loadingTables.has(schema)) {
-    return `<div class="tree-loading nested">${spinner("Loading tables…")}</div>`;
+    return `<div class="tree-loading nested">${spinner("Loading objects…")}</div>`;
   }
-  const tables = conn.tables[schema];
-  if (!tables) return "";
-  if (tables.length === 0) {
-    return `<div class="tree-loading nested">No tables</div>`;
-  }
-  return tables
-    .map((table) => {
-      const isView = isViewKind(table.kind);
-      return `
-        <div class="tree-line">
-          <button class="tree-row nested" data-action="open-table"
-            data-id="${esc(profile.id)}" data-schema="${esc(table.schema)}"
-            data-table="${esc(table.name)}" data-kind="${esc(table.kind)}">
-            <span class="tree-icon">${isView ? icons.view : icons.table}</span>
-            <span class="tree-name">${esc(table.name)}</span>
-            ${isView ? '<span class="tag">view</span>' : ""}
-          </button>
-        </div>
-      `;
-    })
-    .join("");
+  const tables = conn.tables[schema] ?? [];
+  const routines = conn.routines[schema] ?? [];
+  const triggers = conn.triggers[schema] ?? [];
+  const indexes = conn.indexes[schema] ?? [];
+
+  const openTables = conn.expandedSections.has(`${schema}:tables`) || !conn.expandedSections.has(`${schema}:init`);
+  const openRoutines = conn.expandedSections.has(`${schema}:routines`);
+  const openTriggers = conn.expandedSections.has(`${schema}:triggers`);
+  const openIndexes = conn.expandedSections.has(`${schema}:indexes`);
+
+  const tablesContent = tables.length === 0
+    ? `<div class="tree-loading nested">No tables</div>`
+    : tables
+        .map((table) => {
+          const isView = isViewKind(table.kind);
+          return `
+            <div class="tree-line">
+              <button class="tree-row nested" data-action="open-table"
+                data-id="${esc(profile.id)}" data-schema="${esc(table.schema)}"
+                data-table="${esc(table.name)}" data-kind="${esc(table.kind)}">
+                <span class="tree-icon">${isView ? icons.view : icons.table}</span>
+                <span class="tree-name">${esc(table.name)}</span>
+                ${isView ? '<span class="tag">view</span>' : ""}
+              </button>
+            </div>
+          `;
+        })
+        .join("");
+
+  const routinesContent = routines.length === 0
+    ? `<div class="tree-loading nested">No routines</div>`
+    : routines
+        .map((r) => `
+          <div class="tree-line">
+            <button class="tree-row nested static" title="${esc(r.routineType)}: ${esc(r.name)} (${esc(r.dataType ?? "void")})">
+              <span class="tree-icon">${icons.code}</span>
+              <span class="tree-name">${esc(r.name)}</span>
+              <span class="tag">${esc(r.routineType.toLowerCase())}</span>
+            </button>
+          </div>
+        `)
+        .join("");
+
+  const triggersContent = triggers.length === 0
+    ? `<div class="tree-loading nested">No triggers</div>`
+    : triggers
+        .map((tr) => `
+          <div class="tree-line">
+            <button class="tree-row nested static" title="Trigger on ${esc(tr.tableName)} [${esc(tr.timing)} ${esc(tr.event)}]">
+              <span class="tree-icon">${icons.bolt}</span>
+              <span class="tree-name">${esc(tr.name)}</span>
+              <span class="tag">${esc(tr.event.toLowerCase())}</span>
+            </button>
+          </div>
+        `)
+        .join("");
+
+  const indexesContent = indexes.length === 0
+    ? `<div class="tree-loading nested">No indexes</div>`
+    : indexes
+        .map((idx) => `
+          <div class="tree-line">
+            <button class="tree-row nested static" title="Index on ${esc(idx.tableName)} (${esc(idx.columns.join(", "))}) [${esc(idx.indexType)}]">
+              <span class="tree-icon">${icons.columns}</span>
+              <span class="tree-name">${esc(idx.name)}</span>
+              ${idx.primary ? '<span class="tag pk">pk</span>' : idx.unique ? '<span class="tag">unique</span>' : ""}
+            </button>
+          </div>
+        `)
+        .join("");
+
+  return `
+    <div class="tree-subgroup">
+      <!-- Tables -->
+      <div class="tree-line">
+        <button class="tree-row nested" data-action="toggle-section" data-id="${esc(profile.id)}" data-section="${esc(schema)}:tables">
+          <span class="chev ${openTables ? "open" : ""}">${icons.chevron}</span>
+          <span class="tree-icon">${icons.table}</span>
+          <span class="tree-name">Tables (${tables.length})</span>
+        </button>
+      </div>
+      ${openTables ? `<div class="tree-children">${tablesContent}</div>` : ""}
+
+      <!-- Procedures / Functions -->
+      <div class="tree-line">
+        <button class="tree-row nested" data-action="toggle-section" data-id="${esc(profile.id)}" data-section="${esc(schema)}:routines">
+          <span class="chev ${openRoutines ? "open" : ""}">${icons.chevron}</span>
+          <span class="tree-icon">${icons.code}</span>
+          <span class="tree-name">Routines (${routines.length})</span>
+        </button>
+      </div>
+      ${openRoutines ? `<div class="tree-children">${routinesContent}</div>` : ""}
+
+      <!-- Triggers -->
+      <div class="tree-line">
+        <button class="tree-row nested" data-action="toggle-section" data-id="${esc(profile.id)}" data-section="${esc(schema)}:triggers">
+          <span class="chev ${openTriggers ? "open" : ""}">${icons.chevron}</span>
+          <span class="tree-icon">${icons.bolt}</span>
+          <span class="tree-name">Triggers (${triggers.length})</span>
+        </button>
+      </div>
+      ${openTriggers ? `<div class="tree-children">${triggersContent}</div>` : ""}
+
+      <!-- Indexes -->
+      <div class="tree-line">
+        <button class="tree-row nested" data-action="toggle-section" data-id="${esc(profile.id)}" data-section="${esc(schema)}:indexes">
+          <span class="chev ${openIndexes ? "open" : ""}">${icons.chevron}</span>
+          <span class="tree-icon">${icons.columns}</span>
+          <span class="tree-name">Indexes (${indexes.length})</span>
+        </button>
+      </div>
+      ${openIndexes ? `<div class="tree-children">${indexesContent}</div>` : ""}
+    </div>
+  `;
 }
 
 /* ----------------------------------------------------------------- tabbar */
@@ -547,7 +651,10 @@ function renderTabbar(): void {
                 ? icons.columns
                 : icons.plus
         }</span>
-        <span class="tab-title">${esc(tab.title)}</span>
+        <span class="tab-title">
+          ${esc(tab.title)}
+          ${conns.get(tab.profileId)?.profile.readOnly ? `<span class="badge-tag readonly" title="Read-only mode">${icons.lock} RO</span>` : ""}
+        </span>
         <button class="tab-close" title="Close" data-action="close-tab" data-tab-id="${tab.id}">${icons.x}</button>
       </div>
     `,
@@ -566,7 +673,7 @@ function renderWorkspace(): void {
     ws.innerHTML = `
       <div class="welcome">
         <span class="welcome-mark">${icons.bolt}</span>
-        <h1>ChillDB</h1>
+        <h1>ChillDB <span class="version-badge welcome-badge">v${__APP_VERSION__}</span></h1>
         <p>Connect to a PostgreSQL or MySQL/MariaDB database, then open a table or write a query.</p>
         <div class="welcome-actions">
           <button class="btn primary" data-action="add-connection">${icons.plus} New connection</button>
@@ -704,11 +811,54 @@ function filterBarHtml(tab: TableTab): string {
   `;
 }
 
+function columnConfigHtml(tab: TableTab): string {
+  if (!tab.columnConfigOpen) return "";
+  const allCols = tab.result?.columns ?? [];
+  const colOrder = tab.columnOrder.length > 0
+    ? tab.columnOrder
+    : allCols.map((c) => c.name);
+
+  // Re-order based on colOrder
+  const orderedList = [...colOrder];
+  for (const c of allCols) {
+    if (!orderedList.includes(c.name)) orderedList.push(c.name);
+  }
+
+  const items = orderedList
+    .map((name, i) => {
+      const isHidden = tab.hiddenColumns.has(name);
+      return `
+      <div class="col-config-item" draggable="true" data-col-name="${esc(name)}" data-col-idx="${i}" title="Drag to reorder, click eye to toggle visibility">
+        <span class="col-drag-handle">${icons.grip}</span>
+        <button type="button" class="icon-btn tiny toggle-vis-btn ${isHidden ? "hidden-col" : ""}" data-col="${esc(name)}" title="${isHidden ? "Show column" : "Hide column"}">
+          ${isHidden ? icons.eyeOff : icons.eye}
+        </button>
+        <span class="col-config-name ${isHidden ? "muted-strike" : ""}">${esc(name)}</span>
+      </div>
+    `;
+    })
+    .join("");
+
+  return `
+    <div class="col-config-panel">
+      <div class="col-config-header">
+        <span>Columns (${orderedList.length - tab.hiddenColumns.size}/${orderedList.length} visible)</span>
+        <span class="col-config-hint">· Drag chip to reorder</span>
+        <span class="spacer"></span>
+        <button type="button" class="btn ghost tiny" id="btn-reset-columns">Reset</button>
+        <button type="button" class="icon-btn tiny" id="btn-close-col-config">${icons.x}</button>
+      </div>
+      <div class="col-config-list" id="col-config-drag-list">${items}</div>
+    </div>
+  `;
+}
+
 function renderTableTab(ws: HTMLDivElement, tab: TableTab): void {
   const conn = conns.get(tab.profileId);
   const kind = conn?.profile.kind ?? "postgres";
   const editable = !tab.isView;
   const hasFilterActive = tab.filters.length > 0;
+  const hasColConfigActive = tab.hiddenColumns.size > 0 || tab.columnOrder.length > 0;
 
   ws.innerHTML = `
     <div class="view">
@@ -736,6 +886,9 @@ function renderTableTab(ws: HTMLDivElement, tab: TableTab): void {
         <button class="btn ${tab.filterOpen || hasFilterActive ? "active" : ""}" id="btn-toggle-filter" title="Filter builder">
           ${icons.filter} Filter${hasFilterActive ? ` (${tab.filters.length})` : ""}
         </button>
+        <button class="btn ${tab.columnConfigOpen || hasColConfigActive ? "active" : ""}" id="btn-toggle-col-config" title="Columns order & visibility">
+          ${icons.columns} Columns${tab.hiddenColumns.size > 0 ? ` (-${tab.hiddenColumns.size})` : ""}
+        </button>
         ${tab.sort.length > 0 ? `<button class="btn ghost small" id="btn-clear-sort" title="Clear sorting">Reset Sort (${tab.sort.length})</button>` : ""}
         <span class="spacer"></span>
         ${
@@ -749,6 +902,7 @@ function renderTableTab(ws: HTMLDivElement, tab: TableTab): void {
         }
         <button class="btn" id="btn-refresh" data-action="refresh-table">${icons.refresh} Refresh</button>
       </div>
+      <div class="table-col-config-container" id="table-col-config-container">${columnConfigHtml(tab)}</div>
       <div class="table-filter-container" id="table-filter-container">${filterBarHtml(tab)}</div>
       <div class="result-panel" id="result-panel">${resultPanelHtml(tab)}</div>
       <div class="table-bar">
@@ -800,15 +954,25 @@ function renderTableTab(ws: HTMLDivElement, tab: TableTab): void {
     attachFilterEvents(tab);
   });
 
+  // Column config toggle handler
+  byId<HTMLButtonElement>("btn-toggle-col-config")?.addEventListener("click", () => {
+    tab.columnConfigOpen = !tab.columnConfigOpen;
+    const container = byId<HTMLDivElement>("table-col-config-container");
+    if (container) container.innerHTML = columnConfigHtml(tab);
+    attachColumnConfigEvents(tab);
+  });
+
   byId<HTMLButtonElement>("btn-clear-sort")?.addEventListener("click", () => {
     tab.sort = [];
     tab.page = 1;
     tab.selectedRow = null;
+    tab.selectedRows.clear();
     void loadPreview(tab);
     renderWorkspace();
   });
 
   attachFilterEvents(tab);
+  attachColumnConfigEvents(tab);
 
   byId<HTMLButtonElement>("btn-refresh")?.addEventListener("click", () => {
     tab.selectedRow = null;
@@ -905,6 +1069,89 @@ function attachFilterEvents(tab: TableTab): void {
   });
 }
 
+function attachColumnConfigEvents(tab: TableTab): void {
+  const container = byId<HTMLDivElement>("table-col-config-container");
+  if (!container || !tab.columnConfigOpen) return;
+
+  const allCols = tab.result?.columns ?? [];
+  if (tab.columnOrder.length === 0) {
+    tab.columnOrder = allCols.map((c) => c.name);
+  }
+
+  byId<HTMLButtonElement>("btn-close-col-config")?.addEventListener("click", () => {
+    tab.columnConfigOpen = false;
+    container.innerHTML = "";
+  });
+
+  byId<HTMLButtonElement>("btn-reset-columns")?.addEventListener("click", () => {
+    tab.hiddenColumns.clear();
+    tab.columnOrder = allCols.map((c) => c.name);
+    container.innerHTML = columnConfigHtml(tab);
+    attachColumnConfigEvents(tab);
+    updateResultPanel(tab);
+  });
+
+  container.querySelectorAll<HTMLButtonElement>(".toggle-vis-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const col = btn.dataset.col;
+      if (!col) return;
+      if (tab.hiddenColumns.has(col)) {
+        tab.hiddenColumns.delete(col);
+      } else {
+        tab.hiddenColumns.add(col);
+      }
+      container.innerHTML = columnConfigHtml(tab);
+      attachColumnConfigEvents(tab);
+      updateResultPanel(tab);
+    });
+  });
+
+  // Drag and drop reordering
+  let draggedCol: string | null = null;
+  container.querySelectorAll<HTMLElement>(".col-config-item").forEach((item) => {
+    item.addEventListener("dragstart", (e) => {
+      draggedCol = item.dataset.colName ?? null;
+      item.classList.add("dragging");
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", draggedCol ?? "");
+      }
+    });
+
+    item.addEventListener("dragend", () => {
+      item.classList.remove("dragging");
+      container.querySelectorAll(".col-config-item").forEach((el) => el.classList.remove("drag-over"));
+    });
+
+    item.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+      item.classList.add("drag-over");
+    });
+
+    item.addEventListener("dragleave", () => {
+      item.classList.remove("drag-over");
+    });
+
+    item.addEventListener("drop", (e) => {
+      e.preventDefault();
+      item.classList.remove("drag-over");
+      const targetCol = item.dataset.colName;
+      if (!draggedCol || !targetCol || draggedCol === targetCol) return;
+
+      const fromIdx = tab.columnOrder.indexOf(draggedCol);
+      const toIdx = tab.columnOrder.indexOf(targetCol);
+      if (fromIdx !== -1 && toIdx !== -1) {
+        tab.columnOrder.splice(fromIdx, 1);
+        tab.columnOrder.splice(toIdx, 0, draggedCol);
+        container.innerHTML = columnConfigHtml(tab);
+        attachColumnConfigEvents(tab);
+        updateResultPanel(tab);
+      }
+    });
+  });
+}
+
 function pageCount(tab: TableTab): number {
   const total = tab.result?.totalRows;
   if (total === null || total === undefined) return 1;
@@ -938,7 +1185,11 @@ function updateTableToolbar(tab: TableTab): void {
   if (next) next.disabled = tab.loading || tab.page >= pageCount(tab);
 
   const del = byId<HTMLButtonElement>("btn-delete-row");
-  if (del) del.disabled = tab.loading || tab.selectedRow === null;
+  if (del) {
+    const selCount = tab.selectedRows.size > 0 ? tab.selectedRows.size : (tab.selectedRow !== null ? 1 : 0);
+    del.disabled = tab.loading || selCount === 0;
+    del.innerHTML = `${icons.trash} Delete${selCount > 1 ? ` (${selCount})` : ""}`;
+  }
 }
 
 function openCreateSchemaModal(profileId: string, database: string): void {
@@ -1439,6 +1690,11 @@ function renderStructureTab(ws: HTMLDivElement, tab: StructureTab): void {
   const conn = conns.get(tab.profileId);
   const kind = conn?.profile.kind ?? "postgres";
   const enumTypes = kind === "postgres" ? (conn?.enumTypes ?? []) : [];
+  const activeSection = tab.activeSection ?? "columns";
+
+  const columnsCount = tab.columns ? tab.columns.length : 0;
+  const indexesCount = tab.indexes ? tab.indexes.length : 0;
+  const constraintsCount = tab.constraints ? tab.constraints.length : 0;
 
   ws.innerHTML = `
     <div class="view">
@@ -1454,34 +1710,18 @@ function renderStructureTab(ws: HTMLDivElement, tab: StructureTab): void {
         <span class="db-kind-tag">${kind === "postgres" ? "PostgreSQL" : "MySQL"}</span>
       </div>
       <div class="structure-panel">
-        ${structureHtml(tab)}
-        <form class="add-field" id="add-field-form" novalidate>
-          <div class="add-field-title">Add field</div>
-          <div class="add-field-grid">
-            <label class="field">
-              <span>Name</span>
-              <input name="name" placeholder="new_column" autocomplete="off" spellcheck="false" required />
-            </label>
-            <label class="field">
-              <span>Type</span>
-              <select name="type">${typeOptionsHtml(kind, undefined, enumTypes)}</select>
-            </label>
-            <label class="field" id="add-enum-field" hidden>
-              <span>Enum values</span>
-              <input name="enumValues" placeholder="active, inactive" autocomplete="off" spellcheck="false" />
-            </label>
-            <label class="field">
-              <span>Default</span>
-              <input name="default" placeholder="0, 'text', CURRENT_TIMESTAMP" autocomplete="off" spellcheck="false" />
-            </label>
-            <label class="check">
-              <input type="checkbox" name="nullable" checked />
-              <span>Nullable</span>
-            </label>
-            <button class="btn primary" type="submit">${icons.plus} Add field</button>
-          </div>
-          <div class="form-status" id="add-field-status"></div>
-        </form>
+        <div class="structure-tabs">
+          <button type="button" class="structure-tab-btn ${activeSection === "columns" ? "active" : ""}" data-section="columns">
+            ${icons.columns} Columns <span class="badge">${columnsCount}</span>
+          </button>
+          <button type="button" class="structure-tab-btn ${activeSection === "indexes" ? "active" : ""}" data-section="indexes">
+            ${icons.bolt} Indexes <span class="badge">${indexesCount}</span>
+          </button>
+          <button type="button" class="structure-tab-btn ${activeSection === "constraints" ? "active" : ""}" data-section="constraints">
+            ${icons.link} Constraints & Foreign Keys <span class="badge">${constraintsCount}</span>
+          </button>
+        </div>
+        ${structureSectionHtml(tab, kind, enumTypes)}
       </div>
     </div>
   `;
@@ -1494,36 +1734,85 @@ function renderStructureTab(ws: HTMLDivElement, tab: StructureTab): void {
     () => void loadStructure(tab),
   );
 
-  ws.querySelectorAll<HTMLButtonElement>("[data-field-action]").forEach(
-    (button) => {
-      button.addEventListener("click", () => {
-        const column = tab.columns?.[Number(button.dataset.fieldIndex)];
-        if (!column) return;
-        if (button.dataset.fieldAction === "edit") {
-          openEditFieldModal(tab, column);
-        } else {
-          void deleteField(tab, column);
-        }
-      });
-    },
-  );
-
-  const form = ws.querySelector<HTMLFormElement>("#add-field-form");
-  const typeSelect = form?.querySelector<HTMLSelectElement>('[name="type"]');
-  const enumField = form?.querySelector<HTMLElement>("#add-enum-field");
-  const syncEnumField = () => {
-    if (!enumField) return;
-    enumField.hidden = kind !== "mysql" || typeSelect?.value !== "enum";
-  };
-  typeSelect?.addEventListener("change", syncEnumField);
-  syncEnumField();
-  form?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    void addField(tab, form);
+  ws.querySelectorAll<HTMLButtonElement>(".structure-tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      tab.activeSection = (btn.dataset.section as "columns" | "indexes" | "constraints") ?? "columns";
+      renderStructureTab(ws, tab);
+    });
   });
+
+  if (activeSection === "columns") {
+    ws.querySelectorAll<HTMLButtonElement>("[data-field-action]").forEach(
+      (button) => {
+        button.addEventListener("click", () => {
+          const column = tab.columns?.[Number(button.dataset.fieldIndex)];
+          if (!column) return;
+          if (button.dataset.fieldAction === "edit") {
+            openEditFieldModal(tab, column);
+          } else {
+            void deleteField(tab, column);
+          }
+        });
+      },
+    );
+
+    const form = ws.querySelector<HTMLFormElement>("#add-field-form");
+    const typeSelect = form?.querySelector<HTMLSelectElement>('[name="type"]');
+    const enumField = form?.querySelector<HTMLElement>("#add-enum-field");
+    const syncEnumField = () => {
+      if (!enumField) return;
+      enumField.hidden = kind !== "mysql" || typeSelect?.value !== "enum";
+    };
+    typeSelect?.addEventListener("change", syncEnumField);
+    syncEnumField();
+    form?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      void addField(tab, form);
+    });
+  } else if (activeSection === "indexes") {
+    ws.querySelectorAll<HTMLButtonElement>("[data-index-drop]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const idxName = btn.dataset.indexDrop;
+        if (idxName) void deleteIndexAction(tab, idxName);
+      });
+    });
+
+    const form = ws.querySelector<HTMLFormElement>("#add-index-form");
+    form?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      void addIndexAction(tab, form);
+    });
+  } else if (activeSection === "constraints") {
+    ws.querySelectorAll<HTMLButtonElement>("[data-constraint-drop]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const cName = btn.dataset.constraintDrop;
+        const cType = btn.dataset.constraintType ?? "FOREIGN KEY";
+        if (cName) void deleteConstraintAction(tab, cName, cType);
+      });
+    });
+
+    const form = ws.querySelector<HTMLFormElement>("#add-constraint-form");
+    const typeSel = form?.querySelector<HTMLSelectElement>('[name="constraintType"]');
+    const syncConstraintFields = () => {
+      const type = typeSel?.value;
+      const fkFields = form?.querySelector<HTMLElement>("#constraint-fk-fields");
+      const checkFields = form?.querySelector<HTMLElement>("#constraint-check-fields");
+      const colFields = form?.querySelector<HTMLElement>("#constraint-cols-fields");
+      if (fkFields) fkFields.hidden = type !== "FOREIGN KEY";
+      if (checkFields) checkFields.hidden = type !== "CHECK";
+      if (colFields) colFields.hidden = type === "CHECK";
+    };
+    typeSel?.addEventListener("change", syncConstraintFields);
+    syncConstraintFields();
+
+    form?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      void addConstraintAction(tab, form);
+    });
+  }
 }
 
-function structureHtml(tab: StructureTab): string {
+function structureSectionHtml(tab: StructureTab, kind: DbKind, enumTypes: string[]): string {
   if (tab.loading) {
     return `<div class="panel-state">${spinner("Loading structure…")}</div>`;
   }
@@ -1535,10 +1824,20 @@ function structureHtml(tab: StructureTab): string {
       </div>
     `;
   }
-  const columns = tab.columns;
-  if (!columns) {
-    return `<div class="panel-state muted">No structure loaded.</div>`;
+
+  const section = tab.activeSection ?? "columns";
+  if (section === "indexes") {
+    return indexesHtml(tab, kind);
   }
+  if (section === "constraints") {
+    return constraintsHtml(tab);
+  }
+
+  return columnsHtml(tab, kind, enumTypes);
+}
+
+function columnsHtml(tab: StructureTab, kind: DbKind, enumTypes: string[]): string {
+  const columns = tab.columns ?? [];
   if (columns.length === 0) {
     return `<div class="panel-state muted">This table has no fields.</div>`;
   }
@@ -1586,6 +1885,229 @@ function structureHtml(tab: StructureTab): string {
         <tbody>${rows}</tbody>
       </table>
     </div>
+    <form class="add-field" id="add-field-form" novalidate>
+      <div class="add-field-title">Add field</div>
+      <div class="add-field-grid">
+        <label class="field">
+          <span>Name</span>
+          <input name="name" placeholder="new_column" autocomplete="off" spellcheck="false" required />
+        </label>
+        <label class="field">
+          <span>Type</span>
+          <select name="type">${typeOptionsHtml(kind, undefined, enumTypes)}</select>
+        </label>
+        <label class="field" id="add-enum-field" hidden>
+          <span>Enum values</span>
+          <input name="enumValues" placeholder="active, inactive" autocomplete="off" spellcheck="false" />
+        </label>
+        <label class="field">
+          <span>Default</span>
+          <input name="default" placeholder="0, 'text', CURRENT_TIMESTAMP" autocomplete="off" spellcheck="false" />
+        </label>
+        <label class="check">
+          <input type="checkbox" name="nullable" checked />
+          <span>Nullable</span>
+        </label>
+        <button class="btn primary" type="submit">${icons.plus} Add field</button>
+      </div>
+      <div class="form-status" id="add-field-status"></div>
+    </form>
+  `;
+}
+
+function indexesHtml(tab: StructureTab, kind: string): string {
+  const indexes = tab.indexes ?? [];
+  const colOptions = (tab.columns ?? [])
+    .map((c) => `<option value="${esc(c.name)}">${esc(c.name)}</option>`)
+    .join("");
+
+  const rows = indexes.length === 0
+    ? `<tr><td colspan="5" class="empty-state-cell">No indexes found on this table.</td></tr>`
+    : indexes
+        .map(
+          (idx) => `
+        <tr>
+          <td>
+            <strong>${esc(idx.name)}</strong>
+            ${idx.primary ? '<span class="tag pk">PRIMARY</span>' : ""}
+            ${idx.unique && !idx.primary ? '<span class="tag">UNIQUE</span>' : ""}
+          </td>
+          <td>${esc(idx.columns.join(", "))}</td>
+          <td><span class="structure-type">${esc(idx.indexType)}</span></td>
+          <td>${idx.unique ? "YES" : "NO"}</td>
+          <td class="structure-actions-cell">
+            ${
+              idx.primary
+                ? '<span class="faint">Primary</span>'
+                : `<button class="icon-btn tiny danger" data-index-drop="${esc(idx.name)}" title="Drop index">${icons.trash}</button>`
+            }
+          </td>
+        </tr>
+      `,
+        )
+        .join("");
+
+  const typeOptions = kind === "postgres"
+    ? `
+      <option value="BTREE">BTREE</option>
+      <option value="HASH">HASH</option>
+      <option value="GIN">GIN</option>
+      <option value="GIST">GIST</option>
+      <option value="BRIN">BRIN</option>
+    `
+    : `
+      <option value="BTREE">BTREE</option>
+      <option value="HASH">HASH</option>
+      <option value="FULLTEXT">FULLTEXT</option>
+      <option value="SPATIAL">SPATIAL</option>
+    `;
+
+  return `
+    <div class="structure-grid-wrap">
+      <table class="grid structure-grid">
+        <thead>
+          <tr>
+            <th>Index Name</th>
+            <th>Columns</th>
+            <th>Type</th>
+            <th>Unique</th>
+            <th class="structure-actions-head"></th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+
+    <form class="add-field" id="add-index-form" novalidate>
+      <div class="add-field-title">Create Index</div>
+      <div class="add-field-grid">
+        <label class="field">
+          <span>Index name (optional)</span>
+          <input name="name" placeholder="idx_${esc(tab.table)}_col" autocomplete="off" spellcheck="false" />
+        </label>
+        <label class="field">
+          <span>Columns (comma separated or select)</span>
+          <input name="columns" placeholder="col1, col2" autocomplete="off" spellcheck="false" required list="table-cols-list" />
+          <datalist id="table-cols-list">${colOptions}</datalist>
+        </label>
+        <label class="field">
+          <span>Index Type</span>
+          <select name="indexType">${typeOptions}</select>
+        </label>
+        <label class="check">
+          <input type="checkbox" name="unique" />
+          <span>Unique</span>
+        </label>
+        <button class="btn primary" type="submit">${icons.plus} Create Index</button>
+      </div>
+      <div class="form-status" id="add-index-status"></div>
+    </form>
+  `;
+}
+
+function constraintsHtml(tab: StructureTab): string {
+  const constraints = tab.constraints ?? [];
+  const colOptions = (tab.columns ?? [])
+    .map((c) => `<option value="${esc(c.name)}">${esc(c.name)}</option>`)
+    .join("");
+
+  const rows = constraints.length === 0
+    ? `<tr><td colspan="5" class="empty-state-cell">No constraints found on this table.</td></tr>`
+    : constraints
+        .map((c) => {
+          let detail = esc(c.columns.join(", "));
+          if (c.constraintType === "FOREIGN KEY" && c.foreignTable) {
+            detail = `${esc(c.columns.join(", "))} ➔ ${esc(c.foreignTable)}(${esc((c.foreignColumns ?? []).join(", "))})`;
+            if (c.onDelete) detail += ` [DEL: ${esc(c.onDelete)}]`;
+            if (c.onUpdate) detail += ` [UPD: ${esc(c.onUpdate)}]`;
+          } else if (c.constraintType === "CHECK" && c.checkClause) {
+            detail = `CHECK (${esc(c.checkClause)})`;
+          }
+
+          return `
+            <tr>
+              <td><strong>${esc(c.name)}</strong></td>
+              <td><span class="tag ${c.constraintType === "PRIMARY KEY" ? "pk" : ""}">${esc(c.constraintType)}</span></td>
+              <td>${detail}</td>
+              <td class="structure-actions-cell">
+                <button class="icon-btn tiny danger" data-constraint-drop="${esc(c.name)}" data-constraint-type="${esc(c.constraintType)}" title="Drop constraint">${icons.trash}</button>
+              </td>
+            </tr>
+          `;
+        })
+        .join("");
+
+  return `
+    <div class="structure-grid-wrap">
+      <table class="grid structure-grid">
+        <thead>
+          <tr>
+            <th>Constraint Name</th>
+            <th>Type</th>
+            <th>Definition / Target</th>
+            <th class="structure-actions-head"></th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+
+    <form class="add-field" id="add-constraint-form" novalidate>
+      <div class="add-field-title">Add Constraint / Foreign Key</div>
+      <div class="add-field-grid">
+        <label class="field">
+          <span>Constraint Name (optional)</span>
+          <input name="name" placeholder="fk_${esc(tab.table)}_target" autocomplete="off" spellcheck="false" />
+        </label>
+        <label class="field">
+          <span>Constraint Type</span>
+          <select name="constraintType">
+            <option value="FOREIGN KEY">FOREIGN KEY</option>
+            <option value="UNIQUE">UNIQUE</option>
+            <option value="CHECK">CHECK</option>
+          </select>
+        </label>
+        <label id="constraint-cols-fields" class="field">
+          <span>Local Columns</span>
+          <input name="columns" placeholder="user_id" autocomplete="off" spellcheck="false" list="table-cols-list-2" />
+          <datalist id="table-cols-list-2">${colOptions}</datalist>
+        </label>
+        <div id="constraint-fk-fields" class="add-field-grid" style="width: 100%; margin-top: 6px;">
+          <label class="field">
+            <span>Foreign Table</span>
+            <input name="foreignTable" placeholder="users" autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="field">
+            <span>Foreign Columns</span>
+            <input name="foreignColumns" placeholder="id" autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="field">
+            <span>On Delete</span>
+            <select name="onDelete">
+              <option value="">NO ACTION (DEFAULT)</option>
+              <option value="CASCADE">CASCADE</option>
+              <option value="SET NULL">SET NULL</option>
+              <option value="RESTRICT">RESTRICT</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>On Update</span>
+            <select name="onUpdate">
+              <option value="">NO ACTION (DEFAULT)</option>
+              <option value="CASCADE">CASCADE</option>
+              <option value="SET NULL">SET NULL</option>
+              <option value="RESTRICT">RESTRICT</option>
+            </select>
+          </label>
+        </div>
+        <label id="constraint-check-fields" class="field wide" hidden style="width: 100%; margin-top: 6px;">
+          <span>Check Expression</span>
+          <input name="checkClause" placeholder="age >= 18 AND status != 'banned'" autocomplete="off" spellcheck="false" />
+        </label>
+        <button class="btn primary" type="submit" style="margin-top: 10px;">${icons.plus} Add Constraint</button>
+      </div>
+      <div class="form-status" id="add-constraint-status"></div>
+    </form>
   `;
 }
 
@@ -1595,16 +2117,186 @@ async function loadStructure(tab: StructureTab): Promise<void> {
   if (activeTab() === tab) renderWorkspace();
 
   try {
-    tab.columns = await api.describeTable(
-      tab.connectionId,
-      tab.schema,
-      tab.table,
-    );
+    const [cols, idxs, constrs] = await Promise.all([
+      api.describeTable(tab.connectionId, tab.schema, tab.table),
+      api.listIndexes(tab.connectionId, tab.schema, tab.table).catch(() => []),
+      api.listConstraints(tab.connectionId, tab.schema, tab.table).catch(() => []),
+    ]);
+    tab.columns = cols;
+    tab.indexes = idxs;
+    tab.constraints = constrs;
   } catch (error) {
     tab.error = errorMessage(error);
   } finally {
     tab.loading = false;
     if (activeTab() === tab) renderWorkspace();
+  }
+}
+
+async function addIndexAction(tab: StructureTab, form: HTMLFormElement): Promise<void> {
+  const status = form.querySelector<HTMLElement>("#add-index-status");
+  const data = new FormData(form);
+  const name = String(data.get("name") ?? "").trim();
+  const colsStr = String(data.get("columns") ?? "").trim();
+  const indexType = String(data.get("indexType") ?? "BTREE");
+  const unique = data.get("unique") !== null;
+
+  const columns = colsStr
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+  if (columns.length === 0) {
+    if (status) {
+      status.className = "form-status error";
+      status.textContent = "Please specify at least one column.";
+    }
+    return;
+  }
+
+  if (status) {
+    status.className = "form-status info";
+    status.textContent = "Creating index…";
+  }
+
+  try {
+    const input: CreateIndexInput = {
+      name,
+      columns,
+      indexType,
+      unique,
+    };
+    await api.createIndex(tab.connectionId, tab.schema, tab.table, input);
+    toast("Index created successfully", "success");
+    form.reset();
+    if (status) status.textContent = "";
+    await loadStructure(tab);
+  } catch (error) {
+    if (status) {
+      status.className = "form-status error";
+      status.textContent = errorMessage(error);
+    }
+  }
+}
+
+async function deleteIndexAction(tab: StructureTab, indexName: string): Promise<void> {
+  const confirmed = await confirmDialog(
+    "Drop index",
+    `Drop index "${indexName}" on table "${tab.table}"?`,
+    "Drop index",
+    true,
+  );
+  if (!confirmed) return;
+
+  toast(`Dropping index ${indexName}…`, "info");
+  try {
+    await api.dropIndex(tab.connectionId, tab.schema, tab.table, indexName);
+    toast(`Index "${indexName}" dropped successfully`, "success");
+    await loadStructure(tab);
+  } catch (error) {
+    toast(errorMessage(error), "error");
+  }
+}
+
+async function addConstraintAction(tab: StructureTab, form: HTMLFormElement): Promise<void> {
+  const status = form.querySelector<HTMLElement>("#add-constraint-status");
+  const data = new FormData(form);
+  const name = String(data.get("name") ?? "").trim();
+  const constraintType = String(data.get("constraintType") ?? "FOREIGN KEY");
+  const colsStr = String(data.get("columns") ?? "").trim();
+  const checkClause = String(data.get("checkClause") ?? "").trim();
+  const foreignTable = String(data.get("foreignTable") ?? "").trim();
+  const foreignColsStr = String(data.get("foreignColumns") ?? "").trim();
+  const onDelete = String(data.get("onDelete") ?? "").trim() || undefined;
+  const onUpdate = String(data.get("onUpdate") ?? "").trim() || undefined;
+
+  const columns = colsStr
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+  const foreignColumns = foreignColsStr
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+  if (constraintType !== "CHECK" && columns.length === 0) {
+    if (status) {
+      status.className = "form-status error";
+      status.textContent = "Please specify local column(s).";
+    }
+    return;
+  }
+  if (constraintType === "CHECK" && !checkClause) {
+    if (status) {
+      status.className = "form-status error";
+      status.textContent = "Please specify a CHECK expression.";
+    }
+    return;
+  }
+  if (constraintType === "FOREIGN KEY" && !foreignTable) {
+    if (status) {
+      status.className = "form-status error";
+      status.textContent = "Please specify the foreign referenced table.";
+    }
+    return;
+  }
+
+  if (status) {
+    status.className = "form-status info";
+    status.textContent = "Adding constraint…";
+  }
+
+  try {
+    const input: CreateConstraintInput = {
+      name,
+      constraintType,
+      columns,
+      checkClause: constraintType === "CHECK" ? checkClause : undefined,
+      foreignTable: constraintType === "FOREIGN KEY" ? foreignTable : undefined,
+      foreignColumns: foreignColumns.length > 0 ? foreignColumns : undefined,
+      onDelete,
+      onUpdate,
+    };
+    await api.createConstraint(tab.connectionId, tab.schema, tab.table, input);
+    toast("Constraint created successfully", "success");
+    form.reset();
+    if (status) status.textContent = "";
+    await refreshAfterStructureChange(tab);
+  } catch (error) {
+    if (status) {
+      status.className = "form-status error";
+      status.textContent = errorMessage(error);
+    }
+  }
+}
+
+async function deleteConstraintAction(
+  tab: StructureTab,
+  constraintName: string,
+  constraintType: string,
+): Promise<void> {
+  const confirmed = await confirmDialog(
+    "Drop constraint",
+    `Drop constraint "${constraintName}" on table "${tab.table}"?`,
+    "Drop constraint",
+    true,
+  );
+  if (!confirmed) return;
+
+  toast(`Dropping constraint ${constraintName}…`, "info");
+  try {
+    await api.dropConstraint(
+      tab.connectionId,
+      tab.schema,
+      tab.table,
+      constraintName,
+      constraintType,
+    );
+    toast(`Constraint "${constraintName}" dropped successfully`, "success");
+    await refreshAfterStructureChange(tab);
+  } catch (error) {
+    toast(errorMessage(error), "error");
   }
 }
 
@@ -1955,9 +2647,41 @@ function resultPanelHtml(tab: QueryTab | TableTab): string {
       tab.selectedRow,
       (tab.page - 1) * tab.pageSize,
       tab.sort,
+      tab.selectedRows,
+      tab.hiddenColumns,
+      tab.columnOrder,
+      tab.foreignKeys ?? [],
+      tab.draftNewRow,
     );
   }
   return gridHtml(tab.result, null);
+}
+
+function getOrderedColumns(
+  allColumns: QueryResult["columns"],
+  columnOrder: string[],
+  hiddenColumns: Set<string>,
+): { column: QueryResult["columns"][0]; originalIndex: number }[] {
+  const map = new Map<string, { column: QueryResult["columns"][0]; originalIndex: number }>();
+  allColumns.forEach((c, i) => map.set(c.name, { column: c, originalIndex: i }));
+
+  const result: { column: QueryResult["columns"][0]; originalIndex: number }[] = [];
+  const added = new Set<string>();
+
+  for (const name of columnOrder) {
+    if (map.has(name) && !hiddenColumns.has(name)) {
+      result.push(map.get(name)!);
+      added.add(name);
+    }
+  }
+
+  allColumns.forEach((c, i) => {
+    if (!added.has(c.name) && !hiddenColumns.has(c.name)) {
+      result.push({ column: c, originalIndex: i });
+    }
+  });
+
+  return result;
 }
 
 function gridHtml(
@@ -1965,6 +2689,11 @@ function gridHtml(
   selectedRow: number | null,
   rowOffset = 0,
   sortList: SortColumn[] = [],
+  selectedRows: Set<number> = new Set(),
+  hiddenColumns: Set<string> = new Set(),
+  columnOrder: string[] = [],
+  foreignKeys: ForeignKeyRef[] = [],
+  draftNewRow: Record<string, string> | null = null,
 ): string {
   const affected = result.rowsAffected;
   const meta = `
@@ -1983,8 +2712,16 @@ function gridHtml(
     return `${meta}<div class="panel-state muted">Statement executed. No result set.</div>`;
   }
 
-  const head = result.columns
-    .map((column) => {
+  const activeCols = getOrderedColumns(result.columns, columnOrder, hiddenColumns);
+  const allSelected = result.rows.length > 0 && selectedRows.size === result.rows.length;
+
+  const fkMap = new Map<string, ForeignKeyRef>();
+  for (const fk of foreignKeys) {
+    fkMap.set(fk.column, fk);
+  }
+
+  const head = activeCols
+    .map(({ column }) => {
       const sortIdx = sortList.findIndex((s) => s.column === column.name);
       let sortIndicator = "";
       if (sortIdx !== -1) {
@@ -1992,39 +2729,165 @@ function gridHtml(
         const badge = sortList.length > 1 ? `<span class="sort-badge">${sortIdx + 1}</span>` : "";
         sortIndicator = `<span class="sort-icon ${s.desc ? "desc" : "asc"}">${s.desc ? icons.sortDesc : icons.sortAsc}${badge}</span>`;
       }
-      return `<th class="sortable-th" data-col-name="${esc(column.name)}"><div class="th-content"><div class="th-titles"><span class="col-name">${esc(column.name)}</span><span class="col-type">${esc(column.typeName)}</span></div>${sortIndicator}</div></th>`;
+      const fk = fkMap.get(column.name);
+      const fkBadge = fk
+        ? `<span class="fk-col-badge" title="Foreign key to ${esc(fk.foreignTable)}.${esc(fk.foreignColumn)}">${icons.link}</span>`
+        : "";
+
+      return `<th class="sortable-th" data-col-name="${esc(column.name)}" title="${esc(column.name)} (${esc(column.typeName)})"><div class="th-content"><span class="col-name">${esc(column.name)}${fkBadge}</span>${sortIndicator}</div></th>`;
     })
     .join("");
 
   const body = result.rows
     .map(
-      (row, index) => `
-      <tr class="${selectedRow === index ? "selected" : ""}" data-row-index="${index}">
+      (row, index) => {
+        const isSelected = selectedRows.has(index) || selectedRow === index;
+        return `
+      <tr class="${isSelected ? "selected" : ""}" data-row-index="${index}">
+        <td class="select-cell" data-select-row="${index}">
+          <input type="checkbox" class="row-checkbox" data-row="${index}" ${selectedRows.has(index) ? "checked" : ""} />
+        </td>
         <td class="rownum">${rowOffset + index + 1}</td>
-        ${row.map((value, column) => cellHtml(value, column)).join("")}
+        ${activeCols.map(({ originalIndex, column }) => cellHtml(row[originalIndex], originalIndex, fkMap.get(column.name))).join("")}
       </tr>
-    `,
+    `;
+      },
     )
     .join("");
+
+  let draftRowHtml = "";
+  if (draftNewRow !== null) {
+    const draftCells = activeCols
+      .map(({ column }) => {
+        const val = draftNewRow[column.name] ?? "";
+        const inputKind = getFieldInputKind(column.typeName);
+        const enumOpts = inputKind === "enum" ? parseEnumOptions(column.typeName) : [];
+
+        if (inputKind === "enum" && enumOpts.length > 0) {
+          const optsHtml = ['<option value="">-- NULL --</option>', ...enumOpts.map((o) => `<option value="${esc(o)}" ${val === o ? "selected" : ""}>${esc(o)}</option>`)].join("");
+          return `<td class="cell draft-cell"><select class="draft-input" data-draft-col="${esc(column.name)}">${optsHtml}</select></td>`;
+        }
+        if (inputKind === "date" || inputKind === "time" || inputKind === "datetime-local") {
+          let valFmt = val;
+          if (inputKind === "datetime-local" && valFmt.includes(" ")) {
+            valFmt = valFmt.replace(" ", "T").slice(0, 19);
+          }
+          return `<td class="cell draft-cell"><input type="${inputKind}" class="draft-input" data-draft-col="${esc(column.name)}" value="${esc(valFmt)}" /></td>`;
+        }
+
+        return `<td class="cell draft-cell"><input class="draft-input" data-draft-col="${esc(column.name)}" value="${esc(val)}" placeholder="value / NULL" autocomplete="off" spellcheck="false" /></td>`;
+      })
+      .join("");
+
+    draftRowHtml = `
+      <tr class="draft-row">
+        <td class="select-cell draft-actions-cell" title="Save row (Ctrl+Enter)">
+          <button type="button" class="icon-btn tiny primary" id="btn-save-draft-row">${icons.plus}</button>
+        </td>
+        <td class="rownum draft-cancel-cell" title="Cancel (Esc)">
+          <div style="display: flex; align-items: center; justify-content: center; gap: 2px;">
+            <button type="button" class="icon-btn tiny" id="btn-fake-draft-row" title="Fill with fake / mock data">${icons.sparkles}</button>
+            <button type="button" class="icon-btn tiny danger" id="btn-cancel-draft-row" title="Cancel (Esc)">${icons.x}</button>
+          </div>
+        </td>
+        ${draftCells}
+      </tr>
+    `;
+  }
 
   return `
     ${meta}
     <div class="grid-scroll">
       <table class="grid">
-        <thead><tr><th class="rownum">#</th>${head}</tr></thead>
-        <tbody>${body}</tbody>
+        <thead>
+          <tr>
+            <th class="select-all-th"><input type="checkbox" class="select-all-checkbox" ${allSelected ? "checked" : ""} title="Select all rows on page" /></th>
+            <th class="rownum">#</th>
+            ${head}
+          </tr>
+        </thead>
+        <tbody>
+          ${draftRowHtml}
+          ${body}
+        </tbody>
       </table>
     </div>
   `;
 }
 
-function cellHtml(value: unknown, columnIndex: number): string {
+function formatXml(xml: string): string {
+  let formatted = "";
+  let indent = 0;
+  const tab = "  ";
+  xml.split(/>\s*</).forEach((node) => {
+    if (node.match(/^\/\w/)) indent = Math.max(0, indent - 1);
+    formatted += tab.repeat(indent) + "<" + node + ">\n";
+    if (node.match(/^<?\w[^>]*[^\/]$/)) indent++;
+  });
+  return formatted.substring(1, formatted.length - 2);
+}
+
+function openViewerModal(title: string, rawText: string, format: "json" | "xml" | "text"): void {
+  let formatted = rawText;
+  if (format === "json") {
+    try {
+      const parsed = JSON.parse(rawText);
+      formatted = JSON.stringify(parsed, null, 2);
+    } catch {
+      formatted = rawText;
+    }
+  } else if (format === "xml") {
+    try {
+      formatted = formatXml(rawText);
+    } catch {
+      formatted = rawText;
+    }
+  }
+
+  const backdrop = openModal(`
+    <div class="modal medium" id="viewer-modal">
+      <div class="modal-head">
+        <div>
+          <h2>${esc(title)} Viewer</h2>
+          <small class="modal-subtitle">${rawText.length.toLocaleString()} characters</small>
+        </div>
+        <button type="button" class="icon-btn" data-close="true" aria-label="Close">${icons.x}</button>
+      </div>
+      <div class="modal-body" style="padding: 0; display: flex; flex-direction: column;">
+        <div class="viewer-toolbar">
+          <span class="tag ${format === "json" ? "pk" : ""}">${format.toUpperCase()}</span>
+          <span class="spacer"></span>
+          <button type="button" class="btn ghost small" id="btn-copy-viewer">${icons.copy} Copy</button>
+        </div>
+        <textarea class="viewer-content" id="viewer-textarea" readonly spellcheck="false">${esc(formatted)}</textarea>
+      </div>
+      <div class="modal-foot">
+        <span class="spacer"></span>
+        <button type="button" class="btn primary" data-close="true">Close</button>
+      </div>
+    </div>
+  `);
+
+  backdrop.querySelector<HTMLButtonElement>("#btn-copy-viewer")?.addEventListener("click", () => {
+    void navigator.clipboard.writeText(formatted).then(() => {
+      toast("Copied to clipboard", "success");
+    });
+  });
+}
+
+function cellHtml(value: unknown, columnIndex: number, fk?: ForeignKeyRef): string {
   const attrs = `data-col-index="${columnIndex}"`;
+  let fkAction = "";
+  if (fk && value !== null && value !== undefined && value !== "") {
+    const valStr = String(value);
+    fkAction = `<button type="button" class="fk-jump-btn" data-fk-schema="${esc(fk.foreignSchema)}" data-fk-table="${esc(fk.foreignTable)}" data-fk-col="${esc(fk.foreignColumn)}" data-fk-val="${esc(valStr)}" title="Jump to ${esc(fk.foreignTable)} where ${esc(fk.foreignColumn)} = ${esc(valStr)}">${icons.link}</button>`;
+  }
+
   if (value === null || value === undefined) {
     return `<td class="cell null" ${attrs}>NULL</td>`;
   }
   if (typeof value === "number") {
-    return `<td class="cell num" ${attrs}>${esc(value)}</td>`;
+    return `<td class="cell num" ${attrs}>${esc(value)}${fkAction}</td>`;
   }
   if (typeof value === "boolean") {
     return `<td class="cell bool" ${attrs}>${value ? "true" : "false"}</td>`;
@@ -2033,7 +2896,16 @@ function cellHtml(value: unknown, columnIndex: number): string {
   if (text === "") {
     return `<td class="cell empty" ${attrs}>empty</td>`;
   }
-  return `<td class="cell" ${attrs} title="${esc(text.slice(0, 2000))}"><span class="cell-text">${esc(text)}</span></td>`;
+  const trimmed = text.trim();
+  const isJson = (trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"));
+  const isXml = trimmed.startsWith("<") && trimmed.endsWith(">");
+  let viewAction = "";
+  if (isJson || isXml || text.length > 80) {
+    const kind = isJson ? "json" : isXml ? "xml" : "text";
+    viewAction = `<button type="button" class="cell-view-btn" data-viewer-kind="${kind}" title="Preview in ${kind.toUpperCase()} viewer">${icons.code}</button>`;
+  }
+
+  return `<td class="cell" ${attrs} title="${esc(text.slice(0, 2000))}"><span class="cell-text">${esc(text)}</span>${fkAction}${viewAction}</td>`;
 }
 
 function updateResultPanel(tab: ViewTab): void {
@@ -2122,6 +2994,7 @@ async function loadPreview(tab: TableTab): Promise<void> {
   tab.loading = true;
   tab.error = undefined;
   tab.selectedRow = null;
+  tab.selectedRows.clear();
   updateResultPanel(tab);
   updateTableToolbar(tab);
 
@@ -2134,6 +3007,12 @@ async function loadPreview(tab: TableTab): Promise<void> {
           container.innerHTML = filterBarHtml(tab);
           attachFilterEvents(tab);
         }
+      }).catch(() => undefined);
+    }
+    if (!tab.foreignKeys) {
+      void api.listForeignKeys(tab.connectionId, tab.schema, tab.table).then((fks) => {
+        tab.foreignKeys = fks;
+        updateResultPanel(tab);
       }).catch(() => undefined);
     }
     tab.result = await api.tablePage(
@@ -2188,6 +3067,129 @@ function cellToInput(value: unknown): string | null {
 function isLongTextField(typeName: string): boolean {
   const type = typeName.toLowerCase();
   return type === "json" || type === "jsonb" || type.includes("text");
+}
+
+function getFieldInputKind(typeName: string): "date" | "time" | "datetime-local" | "enum" | "text" {
+  const t = typeName.toLowerCase().trim();
+  if (t === "date") return "date";
+  if (t === "time" || t.startsWith("time(") || t.startsWith("time without") || t.startsWith("time with")) return "time";
+  if (t.includes("timestamp") || t === "datetime" || t.startsWith("datetime(")) return "datetime-local";
+  if (t.startsWith("enum(") || t === "enum") return "enum";
+  return "text";
+}
+
+function parseEnumOptions(typeName: string): string[] {
+  const parsed = parseMysqlEnum(typeName);
+  if (parsed) {
+    return parsed.split(",").map((s) => s.trim()).filter(Boolean);
+  }
+  return [];
+}
+
+function generateFakeValue(colName: string, typeName: string): string {
+  const name = colName.toLowerCase();
+  const type = typeName.toLowerCase();
+
+  // Name / Person
+  if (name.includes("first_name") || name === "firstname") {
+    const list = ["Alex", "Jordan", "Taylor", "Morgan", "Sam", "Chris", "Budi", "Siti"];
+    return list[Math.floor(Math.random() * list.length)];
+  }
+  if (name.includes("last_name") || name === "lastname") {
+    const list = ["Smith", "Johnson", "Williams", "Santoso", "Wijaya", "Pratama", "Kurniawan"];
+    return list[Math.floor(Math.random() * list.length)];
+  }
+  if (name.includes("name") || name.includes("author") || name.includes("user")) {
+    const list = ["John Doe", "Jane Doe", "Ahmad Kholil", "Budi Santoso", "Dewi Lestari", "Rian Pratama"];
+    return list[Math.floor(Math.random() * list.length)];
+  }
+
+  // Email
+  if (name.includes("email") || name.includes("mail")) {
+    const domains = ["example.com", "mail.test", "chilldb.dev", "company.org"];
+    const rand = Math.floor(Math.random() * 899) + 100;
+    const domain = domains[Math.floor(Math.random() * domains.length)];
+    return `user${rand}@${domain}`;
+  }
+
+  // Phone
+  if (name.includes("phone") || name.includes("telp") || name.includes("mobile")) {
+    const num = Math.floor(Math.random() * 89999999) + 10000000;
+    return `+62812${num}`;
+  }
+
+  // UUID
+  if (type.includes("uuid") || name.includes("uuid") || name.includes("guid")) {
+    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+      const r = (Math.random() * 16) | 0;
+      const v = c === "x" ? r : (r & 0x3) | 0x8;
+      return v.toString(16);
+    });
+  }
+
+  // Dates & Times
+  const now = new Date();
+  if (type === "date" || name.includes("date") || name.includes("dob") || name.includes("birth")) {
+    return now.toISOString().slice(0, 10);
+  }
+  if (type.includes("time") && !type.includes("timestamp")) {
+    return now.toTimeString().slice(0, 8);
+  }
+  if (type.includes("timestamp") || type === "datetime" || type.startsWith("datetime(")) {
+    return now.toISOString().slice(0, 19).replace("T", " ");
+  }
+
+  // Address & City
+  if (name.includes("city") || name.includes("kota")) {
+    const cities = ["Jakarta", "Surabaya", "Bandung", "Yogyakarta", "Semarang", "Singapore", "Tokyo"];
+    return cities[Math.floor(Math.random() * cities.length)];
+  }
+  if (name.includes("country") || name.includes("negara")) {
+    const countries = ["Indonesia", "Singapore", "Malaysia", "Japan", "United States"];
+    return countries[Math.floor(Math.random() * countries.length)];
+  }
+  if (name.includes("address") || name.includes("alamat")) {
+    const streets = ["Jl. Sudirman No.", "Jl. Thamrin No.", "Jl. Gatot Subroto No.", "Main St."];
+    return `${streets[Math.floor(Math.random() * streets.length)]} ${Math.floor(Math.random() * 120) + 1}`;
+  }
+
+  // Title / Subject / Description
+  if (name.includes("title") || name.includes("judul") || name.includes("subject")) {
+    const titles = ["Project Alpha Update", "Monthly Report", "New Feature Proposal", "System Maintenance Notice"];
+    return titles[Math.floor(Math.random() * titles.length)];
+  }
+  if (name.includes("desc") || name.includes("bio") || name.includes("notes") || name.includes("content")) {
+    return "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore.";
+  }
+
+  // URLs
+  if (name.includes("url") || name.includes("website") || name.includes("link") || name.includes("avatar")) {
+    return `https://example.com/item-${Math.floor(Math.random() * 100)}`;
+  }
+
+  // Enums
+  const enumOpts = parseEnumOptions(typeName);
+  if (enumOpts.length > 0) {
+    return enumOpts[Math.floor(Math.random() * enumOpts.length)];
+  }
+
+  // Boolean
+  if (type === "bool" || type === "boolean" || name.startsWith("is_") || name.startsWith("has_")) {
+    return Math.random() > 0.5 ? "true" : "false";
+  }
+
+  // Numbers / Currency / Amounts
+  if (name.includes("price") || name.includes("amount") || name.includes("salary") || name.includes("total")) {
+    return (Math.floor(Math.random() * 500) * 1000 + 50000).toString();
+  }
+  if (name.includes("age") || name.includes("umur")) {
+    return (Math.floor(Math.random() * 45) + 18).toString();
+  }
+  if (type.includes("int") || type.includes("num") || type.includes("decimal") || type.includes("float")) {
+    return (Math.floor(Math.random() * 90) + 10).toString();
+  }
+
+  return `Sample ${colName} ${Math.floor(Math.random() * 900) + 100}`;
 }
 
 function selectedRow(tab: TableTab): unknown[] | null {
@@ -2254,7 +3256,37 @@ function openRowEditor(tab: TableTab, mode: "insert" | "edit"): void {
               ? "NULL"
               : column.typeName;
         const longText = isLongTextField(column.typeName);
+        const inputKind = getFieldInputKind(column.typeName);
+        const enumOpts = inputKind === "enum" ? parseEnumOptions(column.typeName) : [];
         const fieldValue = isAuto ? "" : cellToText(value);
+        let controlHtml = "";
+
+        if (locked) {
+          controlHtml = `<input data-row-field="${index}" value="${esc(fieldValue)}" placeholder="${esc(placeholder)}" disabled />`;
+        } else if (longText) {
+          controlHtml = `<textarea data-row-field="${index}" placeholder="${esc(placeholder)}" spellcheck="false">${esc(fieldValue)}</textarea>`;
+        } else if (inputKind === "enum" && enumOpts.length > 0) {
+          controlHtml = `
+            <select data-row-field="${index}">
+              ${column.nullable ? '<option value="">-- NULL --</option>' : ""}
+              ${enumOpts
+                .map(
+                  (opt) =>
+                    `<option value="${esc(opt)}" ${fieldValue === opt ? "selected" : ""}>${esc(opt)}</option>`,
+                )
+                .join("")}
+            </select>
+          `;
+        } else if (inputKind === "date" || inputKind === "time" || inputKind === "datetime-local") {
+          let valFmt = fieldValue;
+          if (inputKind === "datetime-local" && valFmt.includes(" ")) {
+            valFmt = valFmt.replace(" ", "T").slice(0, 19);
+          }
+          controlHtml = `<input type="${inputKind}" data-row-field="${index}" value="${esc(valFmt)}" placeholder="${esc(placeholder)}" />`;
+        } else {
+          controlHtml = `<input data-row-field="${index}" value="${esc(fieldValue)}" placeholder="${esc(placeholder)}" autocomplete="off" spellcheck="false" />`;
+        }
+
         return `
           <label class="row-field ${locked ? "locked" : ""} ${longText ? "long" : ""}">
             <span class="row-field-head">
@@ -2264,23 +3296,7 @@ function openRowEditor(tab: TableTab, mode: "insert" | "edit"): void {
               ${column.autoIncrement ? '<span class="tag">auto</span>' : ""}
             </span>
             <span class="row-field-control">
-              ${
-                longText
-                  ? `<textarea
-                data-row-field="${index}"
-                placeholder="${esc(placeholder)}"
-                spellcheck="false"
-                ${locked ? "disabled" : ""}
-              >${esc(fieldValue)}</textarea>`
-                  : `<input
-                data-row-field="${index}"
-                value="${esc(fieldValue)}"
-                placeholder="${esc(placeholder)}"
-                autocomplete="off"
-                spellcheck="false"
-                ${locked ? "disabled" : ""}
-              />`
-              }
+              ${controlHtml}
               ${
                 column.nullable && !locked
                   ? `<label class="null-check"><input type="checkbox" data-null-field="${index}" ${isNull ? "checked" : ""} /> NULL</label>`
@@ -2319,6 +3335,11 @@ function openRowEditor(tab: TableTab, mode: "insert" | "edit"): void {
         </div>
         <div class="modal-foot">
           <button type="button" class="btn ghost" data-close="true">Cancel</button>
+          ${
+            mode === "insert"
+              ? `<button type="button" class="btn ghost" id="btn-modal-faker">${icons.sparkles} Fill fake data</button>`
+              : ""
+          }
           <span class="spacer"></span>
           <button type="submit" class="btn primary">
             ${mode === "insert" ? `${icons.plus} Add row` : `${icons.edit} Save changes`}
@@ -2345,6 +3366,23 @@ function openRowEditor(tab: TableTab, mode: "insert" | "edit"): void {
         box.addEventListener("change", sync);
         sync();
       });
+
+    backdrop.querySelector<HTMLButtonElement>("#btn-modal-faker")?.addEventListener("click", () => {
+      columns.forEach((column, index) => {
+        if (column.autoIncrement) return;
+        const input = form.querySelector<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
+          `[data-row-field="${index}"]`,
+        );
+        const nullBox = form.querySelector<HTMLInputElement>(`[data-null-field="${index}"]`);
+        if (nullBox) {
+          nullBox.checked = false;
+          if (input) input.disabled = false;
+        }
+        if (input) {
+          input.value = generateFakeValue(column.name, column.typeName);
+        }
+      });
+    });
 
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -2454,6 +3492,38 @@ function openRowEditor(tab: TableTab, mode: "insert" | "edit"): void {
   })();
 }
 
+async function saveDraftRow(tab: TableTab): Promise<void> {
+  if (!tab.draftNewRow) return;
+  const cols = await tableColumns(tab);
+  const cells: CellInput[] = [];
+
+  for (const col of cols) {
+    const rawVal = tab.draftNewRow[col.name];
+    if (rawVal === undefined || rawVal === null || rawVal.trim() === "") {
+      if (col.defaultValue || col.autoIncrement) {
+        continue;
+      }
+      if (col.nullable) {
+        cells.push({ column: col.name, value: null });
+        continue;
+      }
+    }
+    const val = rawVal?.trim() ?? "";
+    cells.push({ column: col.name, value: val === "NULL" ? null : val });
+  }
+
+  toast("Adding row…", "info");
+  try {
+    const res = await api.insertRow(tab.connectionId, tab.schema, tab.table, cells);
+    const count = res.rowsAffected ?? 1;
+    toast(`${count} row added`, "success");
+    tab.draftNewRow = null;
+    await loadPreview(tab);
+  } catch (error) {
+    toast(errorMessage(error), "error");
+  }
+}
+
 async function tableColumns(tab: TableTab): Promise<TableColumn[]> {
   if (tab.columns) return tab.columns;
   tab.columns = await api.describeTable(
@@ -2522,7 +3592,45 @@ async function beginInlineEdit(
   const originalText = cellToText(originalValue);
   const originalHtml = cell.innerHTML;
   const originalClass = cell.className;
-  const input = document.createElement("input");
+  const inputKind = getFieldInputKind(column.typeName);
+  const enumOpts = inputKind === "enum" ? parseEnumOptions(column.typeName) : [];
+  let inputEl: HTMLElement;
+
+  if (inputKind === "enum" && enumOpts.length > 0) {
+    const sel = document.createElement("select");
+    sel.className = "cell-input";
+    if (column.nullable) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "-- NULL --";
+      sel.appendChild(opt);
+    }
+    for (const o of enumOpts) {
+      const opt = document.createElement("option");
+      opt.value = o;
+      opt.textContent = o;
+      if (originalText === o) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    inputEl = sel;
+  } else {
+    const input = document.createElement("input");
+    input.className = "cell-input";
+    if (inputKind === "date" || inputKind === "time" || inputKind === "datetime-local") {
+      input.type = inputKind;
+      let valFmt = originalText;
+      if (inputKind === "datetime-local" && valFmt.includes(" ")) {
+        valFmt = valFmt.replace(" ", "T").slice(0, 19);
+      }
+      input.value = valFmt;
+    } else {
+      input.value = originalText;
+      input.autocomplete = "off";
+      input.spellcheck = false;
+    }
+    inputEl = input;
+  }
+
   let done = false;
 
   const restore = () => {
@@ -2539,7 +3647,7 @@ async function beginInlineEdit(
 
   const commit = async () => {
     if (done) return;
-    const value = input.value;
+    const value = (inputEl as HTMLInputElement | HTMLSelectElement).value;
     if (value === originalText) {
       cancel();
       return;
@@ -2552,7 +3660,7 @@ async function beginInlineEdit(
       return;
     }
     done = true;
-    input.disabled = true;
+    (inputEl as HTMLInputElement | HTMLSelectElement).disabled = true;
     cell.classList.add("saving");
 
     try {
@@ -2560,7 +3668,7 @@ async function beginInlineEdit(
         tab.connectionId,
         tab.schema,
         tab.table,
-        [{ column: column.name, value }],
+        [{ column: column.name, value: value === "" && column.nullable ? null : value }],
         keys,
       );
       const count = result.rowsAffected ?? 1;
@@ -2580,28 +3688,27 @@ async function beginInlineEdit(
     }
   };
 
-  input.className = "cell-input";
-  input.value = originalText;
-  input.autocomplete = "off";
-  input.spellcheck = false;
   cell.classList.add("editing");
   cell.textContent = "";
-  cell.appendChild(input);
-  input.focus();
-  input.select();
+  cell.appendChild(inputEl);
+  inputEl.focus();
 
-  input.addEventListener("keydown", (event) => {
+  if (inputEl instanceof HTMLInputElement && (inputKind === "text")) {
+    inputEl.select();
+  }
+
+  inputEl.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
       void commit();
     } else if (event.key === "Escape") {
       event.preventDefault();
-      event.stopPropagation();
       cancel();
     }
   });
-  input.addEventListener("blur", () => {
-    if (!done) void commit();
+
+  inputEl.addEventListener("blur", () => {
+    void commit();
   });
 }
 
@@ -2610,9 +3717,16 @@ async function deleteSelectedRow(tab: TableTab): Promise<void> {
     toast("Views are read-only", "error");
     return;
   }
-  const row = selectedRow(tab);
-  if (!row) {
-    toast("Select a row first", "error");
+
+  // Check if multiple rows selected
+  const indices = tab.selectedRows.size > 0
+    ? [...tab.selectedRows]
+    : tab.selectedRow !== null
+      ? [tab.selectedRow]
+      : [];
+
+  if (indices.length === 0) {
+    toast("Select row(s) first", "error");
     return;
   }
 
@@ -2628,44 +3742,45 @@ async function deleteSelectedRow(tab: TableTab): Promise<void> {
       return;
     }
 
-    const current = rowByColumn(tab, row);
-    const keyCells: CellInput[] = keys.map((column) => ({
-      column: column.name,
-      value: cellToInput(current.get(column.name)),
-    }));
-    if (keyCells.some((key) => key.value === null)) {
-      toast("This row has a NULL primary key value and cannot be deleted safely", "error");
-      return;
+    const rowsKeys: CellInput[][] = [];
+    for (const idx of indices) {
+      const r = tab.result?.rows[idx];
+      if (!r) continue;
+      const current = rowByColumn(tab, r);
+      const rowKeyCells: CellInput[] = keys.map((col) => ({
+        column: col.name,
+        value: cellToInput(current.get(col.name)),
+      }));
+      if (rowKeyCells.some((k) => k.value === null)) {
+        toast("One of the selected rows has a NULL primary key and cannot be deleted safely", "error");
+        return;
+      }
+      rowsKeys.push(rowKeyCells);
     }
 
-    const where = keys
-      .map((column) => {
-        const text = cellToInput(current.get(column.name)) ?? "NULL";
-        const short = text.length > 60 ? `${text.slice(0, 60)}…` : text;
-        return `${column.name} = ${short}`;
-      })
-      .join(", ");
+    if (rowsKeys.length === 0) return;
+
+    const message = rowsKeys.length === 1
+      ? "Delete the selected row? This cannot be undone."
+      : `Delete ${rowsKeys.length} selected rows? This cannot be undone.`;
 
     const confirmed = await confirmDialog(
-      "Delete row",
-      `Delete the row where ${where}? This cannot be undone.`,
-      "Delete row",
+      `Delete ${rowsKeys.length} row${rowsKeys.length === 1 ? "" : "s"}`,
+      message,
+      "Delete",
     );
     if (!confirmed) return;
 
-    const result = await api.deleteRow(
+    const result = await api.deleteRows(
       tab.connectionId,
       tab.schema,
       tab.table,
-      keyCells,
+      rowsKeys,
     );
-    const count = result.rowsAffected ?? 1;
-    if (count === 0) {
-      toast("No rows were deleted. The row may already be gone.", "error");
-    } else {
-      toast(`${count} row${count === 1 ? "" : "s"} deleted`, "success");
-    }
+    const count = result.rowsAffected ?? rowsKeys.length;
+    toast(`${count} row${count === 1 ? "" : "s"} deleted`, "success");
     tab.selectedRow = null;
+    tab.selectedRows.clear();
     await loadPreview(tab);
   } catch (error) {
     toast(errorMessage(error), "error");
@@ -2705,6 +3820,7 @@ function openTableTab(
   schema: string,
   table: string,
   tableKind: string,
+  initialFilter?: FilterCondition,
 ): void {
   const conn = conns.get(profileId);
   if (!conn) return;
@@ -2719,9 +3835,16 @@ function openTableTab(
 
   if (existing) {
     activeTabId = existing.id;
+    if (initialFilter) {
+      existing.filters = [initialFilter];
+      existing.page = 1;
+      existing.selectedRow = null;
+      existing.selectedRows.clear();
+      existing.filterOpen = true;
+    }
     renderTabbar();
     renderWorkspace();
-    if (!existing.result && !existing.loading) void loadPreview(existing);
+    void loadPreview(existing);
     return;
   }
 
@@ -2737,10 +3860,14 @@ function openTableTab(
     page: 1,
     pageSize: 200,
     selectedRow: null,
+    selectedRows: new Set<number>(),
     sort: [],
-    filters: [],
+    filters: initialFilter ? [initialFilter] : [],
     search: "",
-    filterOpen: false,
+    filterOpen: Boolean(initialFilter),
+    columnConfigOpen: false,
+    hiddenColumns: new Set<string>(),
+    columnOrder: [],
     loading: false,
   };
   tabs.push(tab);
@@ -2782,6 +3909,7 @@ function openStructureTab(
     connectionId: conn.session.id,
     schema,
     table,
+    activeSection: "columns",
     loading: false,
   };
   tabs.push(tab);
@@ -2864,6 +3992,45 @@ function closeTab(id: string): void {
   renderWorkspace();
 }
 
+function closeAllTabs(): void {
+  tabs.length = 0;
+  activeTabId = null;
+  renderTabbar();
+  renderWorkspace();
+}
+
+function closeOtherTabs(id: string): void {
+  const target = tabs.find((t) => t.id === id);
+  if (!target) return;
+  tabs.length = 0;
+  tabs.push(target);
+  activeTabId = target.id;
+  renderTabbar();
+  renderWorkspace();
+}
+
+function closeTabsToLeft(id: string): void {
+  const index = tabs.findIndex((t) => t.id === id);
+  if (index <= 0) return;
+  tabs.splice(0, index);
+  if (!tabs.some((t) => t.id === activeTabId)) {
+    activeTabId = id;
+  }
+  renderTabbar();
+  renderWorkspace();
+}
+
+function closeTabsToRight(id: string): void {
+  const index = tabs.findIndex((t) => t.id === id);
+  if (index === -1 || index >= tabs.length - 1) return;
+  tabs.splice(index + 1);
+  if (!tabs.some((t) => t.id === activeTabId)) {
+    activeTabId = id;
+  }
+  renderTabbar();
+  renderWorkspace();
+}
+
 function closeTabsForProfile(profileId: string): void {
   for (let i = tabs.length - 1; i >= 0; i--) {
     if (tabs[i].profileId === profileId) tabs.splice(i, 1);
@@ -2901,6 +4068,10 @@ async function connectProfile(profile: Profile, secrets: Secrets): Promise<void>
     schemas: null,
     databases: null,
     tables: {},
+    routines: {},
+    triggers: {},
+    indexes: {},
+    expandedSections: new Set(),
     expanded: true,
     expandedSchemas: new Set(),
     loadingSchemas: false,
@@ -3023,7 +4194,16 @@ async function loadTables(
   conn.loadingTables.add(schema);
   renderSidebar();
   try {
-    conn.tables[schema] = await api.listTables(conn.session.id, schema);
+    const [tables, routines, triggers, indexes] = await Promise.all([
+      api.listTables(conn.session.id, schema),
+      api.listRoutines(conn.session.id, schema).catch(() => []),
+      api.listTriggers(conn.session.id, schema).catch(() => []),
+      api.listSchemaIndexes(conn.session.id, schema).catch(() => []),
+    ]);
+    conn.tables[schema] = tables;
+    conn.routines[schema] = routines;
+    conn.triggers[schema] = triggers;
+    conn.indexes[schema] = indexes;
   } catch (error) {
     conn.error = errorMessage(error);
   } finally {
@@ -3103,6 +4283,8 @@ function readConnectionForm(form: HTMLFormElement): {
       username: String(data.get("username") ?? ""),
       database: String(data.get("database") ?? ""),
       ssl: data.get("ssl") === "on",
+      sslMode: String(data.get("sslMode") ?? ""),
+      readOnly: data.get("readOnly") === "on",
       savePassword: data.get("savePassword") === "on",
       sshEnabled: data.get("sshEnabled") === "on",
       sshHost: String(data.get("sshHost") ?? ""),
@@ -3133,6 +4315,8 @@ function openConnectionModal(existing?: Profile): void {
       username: "",
       database: "",
       ssl: false,
+      sslMode: "require",
+      readOnly: false,
       savePassword: false,
       sshEnabled: false,
       sshHost: "",
@@ -3190,6 +4374,19 @@ function openConnectionModal(existing?: Profile): void {
         <label class="check wide">
           <input type="checkbox" name="ssl" ${profile.ssl ? "checked" : ""} />
           <span>Require SSL/TLS</span>
+        </label>
+        <label class="field wide">
+          <span>SSL Mode</span>
+          <select name="sslMode">
+            <option value="require" ${profile.sslMode === "require" || !profile.sslMode ? "selected" : ""}>Require (verify CA if possible)</option>
+            <option value="verify-ca" ${profile.sslMode === "verify-ca" ? "selected" : ""}>Verify CA</option>
+            <option value="verify-full" ${profile.sslMode === "verify-full" ? "selected" : ""}>Verify Full / Identity</option>
+            <option value="disable" ${profile.sslMode === "disable" ? "selected" : ""}>Disable</option>
+          </select>
+        </label>
+        <label class="check wide">
+          <input type="checkbox" name="readOnly" ${profile.readOnly ? "checked" : ""} />
+          <span>Read-only mode (block INSERT, UPDATE, DELETE, and DDL queries)</span>
         </label>
         <label class="check wide">
           <input type="checkbox" name="sshEnabled" id="ssh-enabled" ${profile.sshEnabled ? "checked" : ""} />
@@ -3557,6 +4754,51 @@ document.addEventListener("dblclick", (event) => {
   void beginInlineEdit(tab, cell, rowIndex, columnIndex);
 });
 
+function downloadSqlFile(filename: string, content: string): void {
+  const blob = new Blob([content], { type: "text/sql;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+async function exportTableSqlAction(
+  profileId: string,
+  schema: string,
+  table: string,
+): Promise<void> {
+  const conn = conns.get(profileId);
+  if (!conn) return;
+  toast(`Exporting ${table} to SQL…`, "info");
+  try {
+    const sql = await api.dumpTableSql(conn.session.id, schema, table);
+    downloadSqlFile(`${table}_dump.sql`, sql);
+    toast(`Exported ${table} to SQL successfully`, "success");
+  } catch (err) {
+    toast(errorMessage(err), "error");
+  }
+}
+
+async function exportDatabaseSqlAction(
+  profileId: string,
+  schemaOrDb: string,
+): Promise<void> {
+  const conn = conns.get(profileId);
+  if (!conn) return;
+  toast(`Exporting ${schemaOrDb} to SQL…`, "info");
+  try {
+    const sql = await api.dumpDatabaseSql(conn.session.id, schemaOrDb);
+    downloadSqlFile(`${schemaOrDb}_dump.sql`, sql);
+    toast(`Exported ${schemaOrDb} to SQL successfully`, "success");
+  } catch (err) {
+    toast(errorMessage(err), "error");
+  }
+}
+
 function showSchemaMenu(
   profileId: string,
   schema: string,
@@ -3567,6 +4809,8 @@ function showSchemaMenu(
   const menu = document.createElement("div");
   menu.className = "context-menu";
   menu.innerHTML = `
+    <button type="button" data-schema-menu="export">${icons.database}<span>Export to SQL Dump</span></button>
+    <div class="context-sep"></div>
     <button type="button" class="danger" data-schema-menu="delete">${icons.trash}<span>Delete</span></button>
   `;
   document.body.appendChild(menu);
@@ -3577,6 +4821,12 @@ function showSchemaMenu(
   menu.style.left = `${left}px`;
   menu.style.top = `${top}px`;
 
+  menu
+    .querySelector<HTMLButtonElement>('[data-schema-menu="export"]')
+    ?.addEventListener("click", () => {
+      closeRowMenu();
+      void exportDatabaseSqlAction(profileId, schema);
+    });
   menu
     .querySelector<HTMLButtonElement>('[data-schema-menu="delete"]')
     ?.addEventListener("click", () => {
@@ -3599,6 +4849,7 @@ function showTableMenu(
   menu.className = "context-menu";
   menu.innerHTML = `
     <button type="button" data-table-menu="structure">${icons.columns}<span>Structure</span></button>
+    <button type="button" data-table-menu="export">${icons.database}<span>Export to SQL Dump</span></button>
     <div class="context-sep"></div>
     <button type="button" class="warn" data-table-menu="truncate">${icons.eraser}<span>Truncate</span></button>
     <button type="button" class="danger" data-table-menu="delete">${icons.trash}<span>Delete</span></button>
@@ -3618,6 +4869,12 @@ function showTableMenu(
       openStructureTab(profileId, schema, table);
     });
   menu
+    .querySelector<HTMLButtonElement>('[data-table-menu="export"]')
+    ?.addEventListener("click", () => {
+      closeRowMenu();
+      void exportTableSqlAction(profileId, schema, table);
+    });
+  menu
     .querySelector<HTMLButtonElement>('[data-table-menu="truncate"]')
     ?.addEventListener("click", () => {
       closeRowMenu();
@@ -3629,6 +4886,58 @@ function showTableMenu(
       closeRowMenu();
       void deleteTableAction(profileId, schema, table);
     });
+
+  rowMenu = menu;
+}
+
+function showTabContextMenu(tabId: string, x: number, y: number): void {
+  closeRowMenu();
+  const index = tabs.findIndex((t) => t.id === tabId);
+  if (index === -1) return;
+
+  const hasLeft = index > 0;
+  const hasRight = index < tabs.length - 1;
+  const hasOthers = tabs.length > 1;
+
+  const menu = document.createElement("div");
+  menu.className = "context-menu";
+  menu.innerHTML = `
+    <button type="button" data-tab-action="close">${icons.x}<span>Close</span></button>
+    <button type="button" data-tab-action="close-others" ${!hasOthers ? "disabled" : ""}>${icons.x}<span>Close other tabs</span></button>
+    <div class="context-sep"></div>
+    <button type="button" data-tab-action="close-right" ${!hasRight ? "disabled" : ""}>${icons.arrowDown}<span>Close tabs to right</span></button>
+    <button type="button" data-tab-action="close-left" ${!hasLeft ? "disabled" : ""}>${icons.arrowUp}<span>Close tabs to left</span></button>
+    <div class="context-sep"></div>
+    <button type="button" class="danger" data-tab-action="close-all">${icons.trash}<span>Close all tabs</span></button>
+  `;
+  document.body.appendChild(menu);
+
+  const rect = menu.getBoundingClientRect();
+  const left = Math.max(8, Math.min(x, window.innerWidth - rect.width - 8));
+  const top = Math.max(8, Math.min(y, window.innerHeight - rect.height - 8));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+
+  menu.querySelector('[data-tab-action="close"]')?.addEventListener("click", () => {
+    closeRowMenu();
+    closeTab(tabId);
+  });
+  menu.querySelector('[data-tab-action="close-others"]')?.addEventListener("click", () => {
+    closeRowMenu();
+    closeOtherTabs(tabId);
+  });
+  menu.querySelector('[data-tab-action="close-right"]')?.addEventListener("click", () => {
+    closeRowMenu();
+    closeTabsToRight(tabId);
+  });
+  menu.querySelector('[data-tab-action="close-left"]')?.addEventListener("click", () => {
+    closeRowMenu();
+    closeTabsToLeft(tabId);
+  });
+  menu.querySelector('[data-tab-action="close-all"]')?.addEventListener("click", () => {
+    closeRowMenu();
+    closeAllTabs();
+  });
 
   rowMenu = menu;
 }
@@ -3730,6 +5039,32 @@ async function deleteTableAction(
 document.addEventListener("contextmenu", (event) => {
   const target = event.target as HTMLElement;
 
+  const tabEl = target.closest<HTMLElement>(".tab");
+  if (tabEl) {
+    const tabId = tabEl.dataset.tabId;
+    if (tabId) {
+      event.preventDefault();
+      showTabContextMenu(tabId, event.clientX, event.clientY);
+      return;
+    }
+  }
+
+  const dbRow = target.closest<HTMLElement>(
+    '.tree-row[data-action="switch-database"], .tree-row.static',
+  );
+  if (dbRow) {
+    const node = dbRow.closest(".tree-node");
+    const idBtn = node?.querySelector<HTMLElement>("[data-id]");
+    const id = idBtn?.dataset.id ?? "";
+    const nameEl = dbRow.querySelector(".tree-name");
+    const dbName = nameEl?.textContent?.trim() ?? "";
+    if (id && dbName) {
+      event.preventDefault();
+      showSchemaMenu(id, dbName, event.clientX, event.clientY);
+      return;
+    }
+  }
+
   const schemaRow = target.closest<HTMLElement>(
     '.tree-row[data-action="toggle-schema"]',
   );
@@ -3763,19 +5098,26 @@ document.addEventListener("contextmenu", (event) => {
 
   const rowEl = target.closest<HTMLElement>("tr[data-row-index]");
   const tab = activeTab();
-  if (!rowEl || tab?.type !== "table" || tab.isView) return;
+  if (rowEl && tab?.type === "table" && !tab.isView) {
+    const index = Number(rowEl.dataset.rowIndex);
+    if (!Number.isFinite(index)) return;
+    event.preventDefault();
 
-  const index = Number(rowEl.dataset.rowIndex);
-  if (!Number.isFinite(index)) return;
-  event.preventDefault();
+    tab.selectedRow = index;
+    rowEl.parentElement
+      ?.querySelectorAll("tr.selected")
+      .forEach((row) => row.classList.remove("selected"));
+    rowEl.classList.add("selected");
+    updateTableToolbar(tab);
+    showRowMenu(tab, event.clientX, event.clientY);
+    return;
+  }
 
-  tab.selectedRow = index;
-  rowEl.parentElement
-    ?.querySelectorAll("tr.selected")
-    .forEach((row) => row.classList.remove("selected"));
-  rowEl.classList.add("selected");
-  updateTableToolbar(tab);
-  showRowMenu(tab, event.clientX, event.clientY);
+  // Allow native context menu only inside editable text inputs/textareas (for Copy, Cut, Paste)
+  const isTextInput = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
+  if (!isTextInput) {
+    event.preventDefault();
+  }
 });
 
 document.addEventListener("scroll", closeRowMenu, true);
@@ -3783,13 +5125,50 @@ window.addEventListener("resize", closeRowMenu);
 
 /* ------------------------------------------------------- global listeners */
 
+document.addEventListener("change", (event) => {
+  const target = event.target as HTMLElement;
+  if (target.classList.contains("draft-input") && target.tagName === "SELECT") {
+    const sel = target as HTMLSelectElement;
+    const colName = sel.dataset.draftCol;
+    const current = activeTab();
+    if (current?.type === "table" && current.draftNewRow && colName) {
+      current.draftNewRow[colName] = sel.value;
+    }
+  }
+});
+
 document.addEventListener("input", (event) => {
   const target = event.target as HTMLElement;
   if (target.id === "table-search") scheduleTableSearch();
+  if (target.classList.contains("draft-input")) {
+    const input = target as HTMLInputElement;
+    const colName = input.dataset.draftCol;
+    const current = activeTab();
+    if (current?.type === "table" && current.draftNewRow && colName) {
+      current.draftNewRow[colName] = input.value;
+    }
+  }
 });
 
 document.addEventListener("keydown", (event) => {
   const target = event.target as HTMLElement;
+  if (target.classList.contains("draft-input")) {
+    const current = activeTab();
+    if (current?.type === "table") {
+      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        void saveDraftRow(current);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        current.draftNewRow = null;
+        updateResultPanel(current);
+        return;
+      }
+    }
+  }
+
   if (target.id !== "table-search") return;
   if (event.key === "Escape") {
     clearTableSearch();
@@ -3825,6 +5204,113 @@ document.addEventListener("click", (event) => {
   if (!target.closest(".sidebar-search")) hideTableSearch();
 
   const current = activeTab();
+
+  // Save draft row click
+  if (current?.type === "table" && target.closest("#btn-save-draft-row")) {
+    event.stopPropagation();
+    void saveDraftRow(current);
+    return;
+  }
+
+  // Fake / mock data draft row click
+  if (current?.type === "table" && target.closest("#btn-fake-draft-row")) {
+    event.stopPropagation();
+    void (async () => {
+      const cols = await tableColumns(current);
+      if (!current.draftNewRow) current.draftNewRow = {};
+      for (const col of cols) {
+        if (col.autoIncrement) continue;
+        current.draftNewRow[col.name] = generateFakeValue(col.name, col.typeName);
+      }
+      updateResultPanel(current);
+      toast("Draft row filled with mock data", "info");
+    })();
+    return;
+  }
+
+  // Cancel draft row click
+  if (current?.type === "table" && target.closest("#btn-cancel-draft-row")) {
+    event.stopPropagation();
+    current.draftNewRow = null;
+    updateResultPanel(current);
+    return;
+  }
+
+  // Foreign key jump click
+  const fkJmp = target.closest<HTMLElement>(".fk-jump-btn");
+  if (current?.type === "table" && fkJmp) {
+    event.stopPropagation();
+    const foreignSchema = fkJmp.dataset.fkSchema;
+    const foreignTable = fkJmp.dataset.fkTable;
+    const foreignCol = fkJmp.dataset.fkCol;
+    const foreignVal = fkJmp.dataset.fkVal;
+    if (foreignSchema && foreignTable && foreignCol && foreignVal !== undefined) {
+      openTableTab(
+        current.profileId,
+        foreignSchema,
+        foreignTable,
+        "BASE TABLE",
+        { column: foreignCol, op: "=", value: foreignVal },
+      );
+    }
+    return;
+  }
+
+  // Viewer preview click
+  const viewBtn = target.closest<HTMLElement>(".cell-view-btn");
+  if ((current?.type === "table" || current?.type === "query") && viewBtn) {
+    event.stopPropagation();
+    const cell = viewBtn.closest<HTMLTableCellElement>("td[data-col-index]");
+    const colIndex = Number(cell?.dataset.colIndex);
+    const rowEl = viewBtn.closest<HTMLElement>("tr[data-row-index]");
+    const rowIndex = Number(rowEl?.dataset.rowIndex);
+    const kind = (viewBtn.dataset.viewerKind as "json" | "xml" | "text") ?? "text";
+    if (Number.isFinite(rowIndex) && Number.isFinite(colIndex) && current.result?.rows[rowIndex]) {
+      const rawVal = current.result.rows[rowIndex][colIndex];
+      const colName = current.result.columns[colIndex]?.name ?? "Cell";
+      const strVal = typeof rawVal === "string" ? rawVal : JSON.stringify(rawVal);
+      openViewerModal(colName, strVal, kind);
+    }
+    return;
+  }
+
+  // Select all checkbox click
+  const selectAll = target.closest<HTMLInputElement>(".select-all-checkbox");
+  if (current?.type === "table" && selectAll) {
+    const isChecked = selectAll.checked;
+    if (isChecked) {
+      const rowsLen = current.result?.rows.length ?? 0;
+      current.selectedRows.clear();
+      for (let i = 0; i < rowsLen; i++) current.selectedRows.add(i);
+      current.selectedRow = rowsLen > 0 ? 0 : null;
+    } else {
+      current.selectedRows.clear();
+      current.selectedRow = null;
+    }
+    updateResultPanel(current);
+    updateTableToolbar(current);
+    return;
+  }
+
+  // Row checkbox click
+  const rowCheck = target.closest<HTMLInputElement>(".row-checkbox");
+  if (current?.type === "table" && rowCheck) {
+    const idx = Number(rowCheck.dataset.row);
+    if (Number.isFinite(idx)) {
+      if (rowCheck.checked) {
+        current.selectedRows.add(idx);
+        current.selectedRow = idx;
+      } else {
+        current.selectedRows.delete(idx);
+        if (current.selectedRow === idx) {
+          current.selectedRow = current.selectedRows.size > 0 ? [...current.selectedRows][0] : null;
+        }
+      }
+      updateResultPanel(current);
+      updateTableToolbar(current);
+    }
+    return;
+  }
 
   const sortTh = target.closest<HTMLElement>("th.sortable-th");
   if (current?.type === "table" && sortTh) {
@@ -3897,7 +5383,18 @@ document.addEventListener("click", (event) => {
       break;
     case "insert-row": {
       const tab = activeTab();
-      if (tab?.type === "table") openRowEditor(tab, "insert");
+      if (tab?.type === "table") {
+        if (tab.draftNewRow !== undefined && tab.draftNewRow !== null) {
+          tab.draftNewRow = null;
+        } else {
+          tab.draftNewRow = {};
+        }
+        updateResultPanel(tab);
+        if (tab.draftNewRow) {
+          const firstInput = document.querySelector<HTMLInputElement>(".draft-input");
+          firstInput?.focus();
+        }
+      }
       break;
     }
     case "delete-row": {
@@ -3989,6 +5486,21 @@ document.addEventListener("click", (event) => {
       } else {
         conn.expandedSchemas.add(schema);
         if (!conn.tables[schema]) void loadTables(id, schema);
+      }
+      renderSidebar();
+      break;
+    }
+    case "toggle-section": {
+      const conn = conns.get(id);
+      const section = actionEl.dataset.section ?? "";
+      if (!conn || !section) break;
+      const parts = section.split(":");
+      const schema = parts[0];
+      conn.expandedSections.add(`${schema}:init`);
+      if (conn.expandedSections.has(section)) {
+        conn.expandedSections.delete(section);
+      } else {
+        conn.expandedSections.add(section);
       }
       renderSidebar();
       break;

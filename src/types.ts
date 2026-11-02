@@ -10,6 +10,8 @@ export interface Profile {
   username: string;
   database: string;
   ssl: boolean;
+  sslMode?: string;
+  readOnly?: boolean;
   savePassword: boolean;
   sshEnabled: boolean;
   sshHost: string;
@@ -30,12 +32,39 @@ export interface SessionInfo {
   kind: DbKind;
   database: string;
   serverVersion: string;
+  sslEnabled?: boolean;
+  readOnly?: boolean;
 }
 
 export interface TableInfo {
   schema: string;
   name: string;
   kind: string;
+}
+
+export interface RoutineInfo {
+  schema: string;
+  name: string;
+  routineType: string;
+  dataType?: string | null;
+}
+
+export interface TriggerInfo {
+  schema: string;
+  name: string;
+  tableName: string;
+  event: string;
+  timing: string;
+}
+
+export interface SchemaIndexInfo {
+  schema: string;
+  tableName: string;
+  name: string;
+  columns: string[];
+  unique: boolean;
+  primary: boolean;
+  indexType: string;
 }
 
 export interface ColumnInfo {
@@ -105,6 +134,13 @@ export interface FilterCondition {
   value: string;
 }
 
+export interface ForeignKeyRef {
+  column: string;
+  foreignSchema: string;
+  foreignTable: string;
+  foreignColumn: string;
+}
+
 export interface TableTab {
   id: string;
   type: "table";
@@ -117,14 +153,59 @@ export interface TableTab {
   page: number;
   pageSize: number;
   selectedRow: number | null;
+  selectedRows: Set<number>;
   sort: SortColumn[];
   filters: FilterCondition[];
   search: string;
   filterOpen?: boolean;
+  columnConfigOpen?: boolean;
+  hiddenColumns: Set<string>;
+  columnOrder: string[];
+  foreignKeys?: ForeignKeyRef[];
+  draftNewRow?: Record<string, string> | null;
   result?: QueryResult;
   columns?: TableColumn[];
   error?: string;
   loading: boolean;
+}
+
+export interface TableIndex {
+  name: string;
+  columns: string[];
+  unique: boolean;
+  primary: boolean;
+  indexType: string;
+}
+
+export interface TableConstraint {
+  name: string;
+  constraintType: string;
+  columns: string[];
+  checkClause?: string;
+  foreignSchema?: string;
+  foreignTable?: string;
+  foreignColumns?: string[];
+  onDelete?: string;
+  onUpdate?: string;
+}
+
+export interface CreateIndexInput {
+  name: string;
+  columns: string[];
+  unique: boolean;
+  indexType?: string;
+}
+
+export interface CreateConstraintInput {
+  name: string;
+  constraintType: string;
+  columns: string[];
+  checkClause?: string;
+  foreignSchema?: string;
+  foreignTable?: string;
+  foreignColumns?: string[];
+  onDelete?: string;
+  onUpdate?: string;
 }
 
 export interface StructureTab {
@@ -135,7 +216,10 @@ export interface StructureTab {
   connectionId: string;
   schema: string;
   table: string;
+  activeSection?: "columns" | "indexes" | "constraints";
   columns?: TableColumn[];
+  indexes?: TableIndex[];
+  constraints?: TableConstraint[];
   loading: boolean;
   error?: string;
 }
@@ -163,6 +247,10 @@ export interface ConnectionState {
   schemas: string[] | null;
   databases: string[] | null;
   tables: Record<string, TableInfo[] | undefined>;
+  routines: Record<string, RoutineInfo[] | undefined>;
+  triggers: Record<string, TriggerInfo[] | undefined>;
+  indexes: Record<string, SchemaIndexInfo[] | undefined>;
+  expandedSections: Set<string>; // key: "schema:routines" | "schema:triggers" | "schema:indexes"
   expanded: boolean;
   expandedSchemas: Set<string>;
   loadingSchemas: boolean;

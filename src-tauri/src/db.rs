@@ -53,6 +53,10 @@ pub struct Profile {
     #[serde(default)]
     pub ssl: bool,
     #[serde(default)]
+    pub ssl_mode: String, // "disable" | "require" | "verify-ca" | "verify-full"
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
     pub save_password: bool,
     #[serde(default)]
     pub ssh_enabled: bool,
@@ -77,6 +81,8 @@ pub struct SessionInfo {
     pub kind: DbKind,
     pub database: String,
     pub server_version: String,
+    pub ssl_enabled: bool,
+    pub read_only: bool,
 }
 
 #[derive(Serialize)]
@@ -112,7 +118,7 @@ pub struct FilterCondition {
     pub value: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableColumn {
     pub name: String,
@@ -123,7 +129,63 @@ pub struct TableColumn {
     pub auto_increment: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignKeyRef {
+    pub column: String,
+    pub foreign_schema: String,
+    pub foreign_table: String,
+    pub foreign_column: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableIndex {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub unique: bool,
+    pub primary: bool,
+    pub index_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableConstraint {
+    pub name: String,
+    pub constraint_type: String, // PRIMARY KEY, UNIQUE, FOREIGN KEY, CHECK
+    pub columns: Vec<String>,
+    pub check_clause: Option<String>,
+    pub foreign_schema: Option<String>,
+    pub foreign_table: Option<String>,
+    pub foreign_columns: Option<Vec<String>>,
+    pub on_delete: Option<String>,
+    pub on_update: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateIndexInput {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub unique: bool,
+    pub index_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateConstraintInput {
+    pub name: String,
+    pub constraint_type: String, // UNIQUE, FOREIGN KEY, CHECK
+    pub columns: Vec<String>,
+    pub check_clause: Option<String>,
+    pub foreign_schema: Option<String>,
+    pub foreign_table: Option<String>,
+    pub foreign_columns: Option<Vec<String>>,
+    pub on_delete: Option<String>,
+    pub on_update: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CellInput {
     pub column: String,
@@ -166,6 +228,37 @@ pub struct TableInfo {
     pub kind: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutineInfo {
+    pub schema: String,
+    pub name: String,
+    pub routine_type: String, // FUNCTION or PROCEDURE
+    pub data_type: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerInfo {
+    pub schema: String,
+    pub name: String,
+    pub table_name: String,
+    pub event: String,
+    pub timing: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaIndexInfo {
+    pub schema: String,
+    pub table_name: String,
+    pub name: String,
+    pub columns: Vec<String>,
+    pub unique: bool,
+    pub primary: bool,
+    pub index_type: String,
+}
+
 pub enum DbPool {
     Postgres(Pool<Postgres>),
     Mysql(Pool<MySql>),
@@ -186,7 +279,7 @@ pub struct Session {
     pub database: String,
     pub server_version: String,
     pub pool: DbPool,
-    target: Profile,
+    pub target: Profile,
     password: String,
     _tunnel: Option<Arc<SshTunnel>>,
 }
@@ -232,16 +325,30 @@ fn connection_url(profile: &Profile, password: &str) -> Result<String, String> {
 
     match profile.kind {
         DbKind::Postgres => {
-            url.query_pairs_mut().append_pair(
-                "sslmode",
-                if profile.ssl { "require" } else { "disable" },
-            );
+            let mode = if !profile.ssl_mode.is_empty() {
+                profile.ssl_mode.as_str()
+            } else if profile.ssl {
+                "require"
+            } else {
+                "disable"
+            };
+            url.query_pairs_mut().append_pair("sslmode", mode);
         }
         DbKind::Mysql => {
-            url.query_pairs_mut().append_pair(
-                "ssl-mode",
-                if profile.ssl { "required" } else { "disabled" },
-            );
+            let mode = if !profile.ssl_mode.is_empty() {
+                match profile.ssl_mode.as_str() {
+                    "disable" => "disabled",
+                    "require" => "required",
+                    "verify-ca" => "verify_ca",
+                    "verify-full" => "verify_identity",
+                    other => other,
+                }
+            } else if profile.ssl {
+                "required"
+            } else {
+                "disabled"
+            };
+            url.query_pairs_mut().append_pair("ssl-mode", mode);
         }
     }
 
@@ -491,6 +598,222 @@ pub async fn search_tables(
                     })
                 })
                 .collect()
+        }
+    }
+}
+
+pub async fn list_routines(
+    session: &Session,
+    schema: &str,
+) -> Result<Vec<RoutineInfo>, String> {
+    match &session.pool {
+        DbPool::Postgres(pool) => {
+            let rows = sqlx::query(
+                "SELECT routine_name::text AS routine_name,
+                        routine_type::text AS routine_type,
+                        data_type::text AS data_type
+                 FROM information_schema.routines
+                 WHERE routine_schema::text = $1
+                 ORDER BY routine_name",
+            )
+            .bind(schema)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+            rows.iter()
+                .map(|row| {
+                    Ok(RoutineInfo {
+                        schema: schema.to_string(),
+                        name: row.try_get("routine_name").map_err(|e| e.to_string())?,
+                        routine_type: row.try_get("routine_type").map_err(|e| e.to_string())?,
+                        data_type: row.try_get("data_type").ok(),
+                    })
+                })
+                .collect()
+        }
+        DbPool::Mysql(pool) => {
+            let rows = sqlx::query(
+                "SELECT CONVERT(routine_name USING utf8mb4) AS routine_name,
+                        CONVERT(routine_type USING utf8mb4) AS routine_type,
+                        CONVERT(dtd_identifier USING utf8mb4) AS data_type
+                 FROM information_schema.routines
+                 WHERE routine_schema = ?
+                 ORDER BY routine_name",
+            )
+            .bind(schema)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+            rows.iter()
+                .map(|row| {
+                    Ok(RoutineInfo {
+                        schema: schema.to_string(),
+                        name: row.try_get(0).map_err(|e| e.to_string())?,
+                        routine_type: row.try_get(1).map_err(|e| e.to_string())?,
+                        data_type: row.try_get(2).ok(),
+                    })
+                })
+                .collect()
+        }
+    }
+}
+
+pub async fn list_triggers(
+    session: &Session,
+    schema: &str,
+) -> Result<Vec<TriggerInfo>, String> {
+    match &session.pool {
+        DbPool::Postgres(pool) => {
+            let rows = sqlx::query(
+                "SELECT trigger_name::text AS trigger_name,
+                        event_object_table::text AS table_name,
+                        event_manipulation::text AS event,
+                        action_timing::text AS timing
+                 FROM information_schema.triggers
+                 WHERE trigger_schema::text = $1
+                 ORDER BY trigger_name",
+            )
+            .bind(schema)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+            rows.iter()
+                .map(|row| {
+                    Ok(TriggerInfo {
+                        schema: schema.to_string(),
+                        name: row.try_get("trigger_name").map_err(|e| e.to_string())?,
+                        table_name: row.try_get("table_name").map_err(|e| e.to_string())?,
+                        event: row.try_get("event").map_err(|e| e.to_string())?,
+                        timing: row.try_get("timing").map_err(|e| e.to_string())?,
+                    })
+                })
+                .collect()
+        }
+        DbPool::Mysql(pool) => {
+            let rows = sqlx::query(
+                "SELECT CONVERT(trigger_name USING utf8mb4) AS trigger_name,
+                        CONVERT(event_object_table USING utf8mb4) AS table_name,
+                        CONVERT(event_manipulation USING utf8mb4) AS event,
+                        CONVERT(action_timing USING utf8mb4) AS timing
+                 FROM information_schema.triggers
+                 WHERE trigger_schema = ?
+                 ORDER BY trigger_name",
+            )
+            .bind(schema)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+            rows.iter()
+                .map(|row| {
+                    Ok(TriggerInfo {
+                        schema: schema.to_string(),
+                        name: row.try_get(0).map_err(|e| e.to_string())?,
+                        table_name: row.try_get(1).map_err(|e| e.to_string())?,
+                        event: row.try_get(2).map_err(|e| e.to_string())?,
+                        timing: row.try_get(3).map_err(|e| e.to_string())?,
+                    })
+                })
+                .collect()
+        }
+    }
+}
+
+pub async fn list_schema_indexes(
+    session: &Session,
+    schema: &str,
+) -> Result<Vec<SchemaIndexInfo>, String> {
+    match &session.pool {
+        DbPool::Postgres(pool) => {
+            let rows = sqlx::query(
+                "SELECT t.relname::text AS table_name,
+                        i.relname::text AS index_name,
+                        a.attname::text AS column_name,
+                        ix.indisunique AS is_unique,
+                        ix.indisprimary AS is_primary,
+                        am.amname::text AS index_type
+                 FROM pg_class t
+                 JOIN pg_namespace n ON n.oid = t.relnamespace
+                 JOIN pg_index ix ON t.oid = ix.indrelid
+                 JOIN pg_class i ON i.oid = ix.indexrelid
+                 JOIN pg_am am ON am.oid = i.relam
+                 JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+                 WHERE n.nspname = $1 AND t.relkind IN ('r', 'm')
+                 ORDER BY t.relname, i.relname, a.attnum",
+            )
+            .bind(schema)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+            let mut map: std::collections::BTreeMap<(String, String), SchemaIndexInfo> = std::collections::BTreeMap::new();
+            for r in rows {
+                let table_name: String = r.try_get("table_name").map_err(|e| e.to_string())?;
+                let index_name: String = r.try_get("index_name").map_err(|e| e.to_string())?;
+                let col_name: String = r.try_get("column_name").map_err(|e| e.to_string())?;
+                let is_unique: bool = r.try_get("is_unique").unwrap_or(false);
+                let is_primary: bool = r.try_get("is_primary").unwrap_or(false);
+                let index_type: String = r.try_get("index_type").unwrap_or_else(|_| "btree".to_string());
+
+                let entry = map.entry((table_name.clone(), index_name.clone())).or_insert_with(|| SchemaIndexInfo {
+                    schema: schema.to_string(),
+                    table_name,
+                    name: index_name,
+                    columns: Vec::new(),
+                    unique: is_unique,
+                    primary: is_primary,
+                    index_type,
+                });
+                if !entry.columns.contains(&col_name) {
+                    entry.columns.push(col_name);
+                }
+            }
+            Ok(map.into_values().collect())
+        }
+        DbPool::Mysql(pool) => {
+            let rows = sqlx::query(
+                "SELECT CONVERT(table_name USING utf8mb4) AS table_name,
+                        CONVERT(index_name USING utf8mb4) AS index_name,
+                        CONVERT(column_name USING utf8mb4) AS column_name,
+                        non_unique,
+                        CONVERT(index_type USING utf8mb4) AS index_type
+                 FROM information_schema.statistics
+                 WHERE table_schema = ?
+                 ORDER BY table_name, index_name, seq_in_index",
+            )
+            .bind(schema)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+            let mut map: std::collections::BTreeMap<(String, String), SchemaIndexInfo> = std::collections::BTreeMap::new();
+            for r in rows {
+                let table_name: String = r.try_get(0).map_err(|e| e.to_string())?;
+                let index_name: String = r.try_get(1).map_err(|e| e.to_string())?;
+                let col_name: String = r.try_get(2).map_err(|e| e.to_string())?;
+                let non_unique: i64 = r.try_get(3).unwrap_or(1);
+                let index_type: String = r.try_get(4).unwrap_or_else(|_| "BTREE".to_string());
+
+                let is_primary = index_name.to_uppercase() == "PRIMARY";
+                let is_unique = non_unique == 0;
+
+                let entry = map.entry((table_name.clone(), index_name.clone())).or_insert_with(|| SchemaIndexInfo {
+                    schema: schema.to_string(),
+                    table_name,
+                    name: index_name,
+                    columns: Vec::new(),
+                    unique: is_unique,
+                    primary: is_primary,
+                    index_type,
+                });
+                if !entry.columns.contains(&col_name) {
+                    entry.columns.push(col_name);
+                }
+            }
+            Ok(map.into_values().collect())
         }
     }
 }
@@ -966,6 +1289,9 @@ pub async fn insert_row(
     table: &str,
     cells: &[CellInput],
 ) -> Result<QueryResult, String> {
+    if session.target.read_only {
+        return Err("Database connection is in READ-ONLY mode. Modifications are blocked.".to_string());
+    }
     let qualified = qualified_name(schema, table, session.kind);
     let sql = if cells.is_empty() {
         match session.kind {
@@ -995,6 +1321,9 @@ pub async fn update_row(
     values: &[CellInput],
     keys: &[CellInput],
 ) -> Result<QueryResult, String> {
+    if session.target.read_only {
+        return Err("Database connection is in READ-ONLY mode. Modifications are blocked.".to_string());
+    }
     if values.is_empty() {
         return Err("There are no changes to save.".to_string());
     }
@@ -1034,6 +1363,9 @@ pub async fn delete_row(
     table: &str,
     keys: &[CellInput],
 ) -> Result<QueryResult, String> {
+    if session.target.read_only {
+        return Err("Database connection is in READ-ONLY mode. Modifications are blocked.".to_string());
+    }
     require_primary_key(session, schema, table, keys).await?;
 
     let qualified = qualified_name(schema, table, session.kind);
@@ -1051,6 +1383,542 @@ pub async fn delete_row(
 
     let sql = format!("DELETE FROM {qualified} WHERE {conditions}");
     execute(session, &sql).await
+}
+
+pub async fn delete_rows(
+    session: &Session,
+    schema: &str,
+    table: &str,
+    rows_keys: &[Vec<CellInput>],
+) -> Result<QueryResult, String> {
+    if session.target.read_only {
+        return Err("Database connection is in READ-ONLY mode. Modifications are blocked.".to_string());
+    }
+    if rows_keys.is_empty() {
+        return Ok(QueryResult {
+            columns: Vec::new(),
+            rows: Vec::new(),
+            rows_affected: Some(0),
+            total_rows: None,
+            duration_ms: 0,
+            statement: String::new(),
+        });
+    }
+
+    let qualified = qualified_name(schema, table, session.kind);
+    let mut row_condition_clauses = Vec::new();
+
+    for keys in rows_keys {
+        require_primary_key(session, schema, table, keys).await?;
+        let clause = keys
+            .iter()
+            .map(|cell| {
+                format!(
+                    "{} = {}",
+                    quote_ident(&cell.column, session.kind),
+                    cell_literal(cell, session.kind)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        row_condition_clauses.push(format!("({clause})"));
+    }
+
+    let combined = row_condition_clauses.join(" OR ");
+    let sql = format!("DELETE FROM {qualified} WHERE {combined}");
+    execute(session, &sql).await
+}
+
+pub async fn list_indexes(
+    session: &Session,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<TableIndex>, String> {
+    match &session.pool {
+        DbPool::Postgres(pool) => {
+            let sql = "SELECT
+                i.relname AS index_name,
+                ix.indisunique AS is_unique,
+                ix.indisprimary AS is_primary,
+                am.amname AS index_type,
+                ARRAY_TO_STRING(ARRAY_AGG(a.attname ORDER BY array_position(ix.indkey, a.attnum)), ',') AS column_names
+            FROM pg_class t
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            JOIN pg_index ix ON t.oid = ix.indrelid
+            JOIN pg_class i ON i.oid = ix.indexrelid
+            JOIN pg_am am ON i.relam = am.oid
+            JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+            WHERE n.nspname = $1 AND t.relname = $2
+            GROUP BY i.relname, ix.indisunique, ix.indisprimary, am.amname
+            ORDER BY i.relname";
+
+            let rows = sqlx::query(sql)
+                .bind(schema)
+                .bind(table)
+                .fetch_all(pool)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            let mut out = Vec::new();
+            for r in rows {
+                let name: String = r.try_get("index_name").map_err(|e| e.to_string())?;
+                let unique: bool = r.try_get("is_unique").map_err(|e| e.to_string())?;
+                let primary: bool = r.try_get("is_primary").map_err(|e| e.to_string())?;
+                let index_type: String = r.try_get("index_type").map_err(|e| e.to_string())?;
+                let cols_str: String = r.try_get("column_names").unwrap_or_default();
+                let columns = cols_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+
+                out.push(TableIndex {
+                    name,
+                    columns,
+                    unique,
+                    primary,
+                    index_type: index_type.to_uppercase(),
+                });
+            }
+            Ok(out)
+        }
+        DbPool::Mysql(pool) => {
+            let sql = "SELECT
+                index_name,
+                non_unique,
+                index_type,
+                GROUP_CONCAT(column_name ORDER BY seq_in_index) AS column_names
+            FROM information_schema.statistics
+            WHERE table_schema = ? AND table_name = ?
+            GROUP BY index_name, non_unique, index_type
+            ORDER BY index_name";
+
+            let rows = sqlx::query(sql)
+                .bind(schema)
+                .bind(table)
+                .fetch_all(pool)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            let mut out = Vec::new();
+            for r in rows {
+                let name: String = r.try_get("index_name").map_err(|e| e.to_string())?;
+                let non_unique: i64 = r.try_get("non_unique").map_err(|e| e.to_string())?;
+                let index_type: String = r.try_get("index_type").map_err(|e| e.to_string())?;
+                let cols_str: String = r.try_get("column_names").unwrap_or_default();
+                let columns = cols_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+
+                let is_primary = name.eq_ignore_ascii_case("PRIMARY");
+                out.push(TableIndex {
+                    name,
+                    columns,
+                    unique: non_unique == 0,
+                    primary: is_primary,
+                    index_type,
+                });
+            }
+            Ok(out)
+        }
+    }
+}
+
+pub async fn list_constraints(
+    session: &Session,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<TableConstraint>, String> {
+    match &session.pool {
+        DbPool::Postgres(pool) => {
+            let sql = "SELECT
+                tc.constraint_name,
+                tc.constraint_type,
+                COALESCE(cc.check_clause, '') AS check_clause,
+                COALESCE(ccu.table_schema, '') AS foreign_schema,
+                COALESCE(ccu.table_name, '') AS foreign_table,
+                COALESCE(ARRAY_TO_STRING(ARRAY_AGG(DISTINCT kcu.column_name), ','), '') AS local_columns,
+                COALESCE(ARRAY_TO_STRING(ARRAY_AGG(DISTINCT ccu.column_name), ','), '') AS foreign_columns,
+                COALESCE(rc.delete_rule, '') AS on_delete,
+                COALESCE(rc.update_rule, '') AS on_update
+            FROM information_schema.table_constraints tc
+            LEFT JOIN information_schema.check_constraints cc
+                   ON cc.constraint_name = tc.constraint_name
+                  AND cc.constraint_schema = tc.table_schema
+            LEFT JOIN information_schema.key_column_usage kcu
+                   ON kcu.constraint_name = tc.constraint_name
+                  AND kcu.table_schema = tc.table_schema
+            LEFT JOIN information_schema.referential_constraints rc
+                   ON rc.constraint_name = tc.constraint_name
+                  AND rc.constraint_schema = tc.table_schema
+            LEFT JOIN information_schema.constraint_column_usage ccu
+                   ON ccu.constraint_name = tc.constraint_name
+                  AND ccu.table_schema = tc.table_schema
+            WHERE tc.table_schema = $1 AND tc.table_name = $2
+            GROUP BY tc.constraint_name, tc.constraint_type, cc.check_clause, ccu.table_schema, ccu.table_name, rc.delete_rule, rc.update_rule
+            ORDER BY tc.constraint_name";
+
+            let rows = sqlx::query(sql)
+                .bind(schema)
+                .bind(table)
+                .fetch_all(pool)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            let mut out = Vec::new();
+            for r in rows {
+                let name: String = r.try_get("constraint_name").map_err(|e| e.to_string())?;
+                let constraint_type: String = r.try_get("constraint_type").map_err(|e| e.to_string())?;
+                let check_raw: String = r.try_get("check_clause").unwrap_or_default();
+                let f_schema: String = r.try_get("foreign_schema").unwrap_or_default();
+                let f_table: String = r.try_get("foreign_table").unwrap_or_default();
+                let l_cols_raw: String = r.try_get("local_columns").unwrap_or_default();
+                let f_cols_raw: String = r.try_get("foreign_columns").unwrap_or_default();
+                let on_delete_raw: String = r.try_get("on_delete").unwrap_or_default();
+                let on_update_raw: String = r.try_get("on_update").unwrap_or_default();
+
+                let columns: Vec<String> = l_cols_raw
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+
+                let foreign_columns = if f_cols_raw.is_empty() {
+                    None
+                } else {
+                    Some(
+                        f_cols_raw
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect(),
+                    )
+                };
+
+                out.push(TableConstraint {
+                    name,
+                    constraint_type,
+                    columns,
+                    check_clause: if check_raw.is_empty() { None } else { Some(check_raw) },
+                    foreign_schema: if f_schema.is_empty() { None } else { Some(f_schema) },
+                    foreign_table: if f_table.is_empty() { None } else { Some(f_table) },
+                    foreign_columns,
+                    on_delete: if on_delete_raw.is_empty() { None } else { Some(on_delete_raw) },
+                    on_update: if on_update_raw.is_empty() { None } else { Some(on_update_raw) },
+                });
+            }
+            Ok(out)
+        }
+        DbPool::Mysql(pool) => {
+            let sql = "SELECT
+                tc.constraint_name,
+                tc.constraint_type,
+                COALESCE(cc.check_clause, '') AS check_clause,
+                COALESCE(kcu.referenced_table_schema, '') AS foreign_schema,
+                COALESCE(kcu.referenced_table_name, '') AS foreign_table,
+                COALESCE(GROUP_CONCAT(DISTINCT kcu.column_name), '') AS local_columns,
+                COALESCE(GROUP_CONCAT(DISTINCT kcu.referenced_column_name), '') AS foreign_columns,
+                COALESCE(rc.delete_rule, '') AS on_delete,
+                COALESCE(rc.update_rule, '') AS on_update
+            FROM information_schema.table_constraints tc
+            LEFT JOIN information_schema.check_constraints cc
+                   ON cc.constraint_name = tc.constraint_name
+                  AND cc.constraint_schema = tc.table_schema
+            LEFT JOIN information_schema.key_column_usage kcu
+                   ON kcu.constraint_name = tc.constraint_name
+                  AND kcu.table_schema = tc.table_schema
+            LEFT JOIN information_schema.referential_constraints rc
+                   ON rc.constraint_name = tc.constraint_name
+                  AND rc.constraint_schema = tc.table_schema
+            WHERE tc.table_schema = ? AND tc.table_name = ?
+            GROUP BY tc.constraint_name, tc.constraint_type, cc.check_clause, kcu.referenced_table_schema, kcu.referenced_table_name, rc.delete_rule, rc.update_rule
+            ORDER BY tc.constraint_name";
+
+            let rows = sqlx::query(sql)
+                .bind(schema)
+                .bind(table)
+                .fetch_all(pool)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            let mut out = Vec::new();
+            for r in rows {
+                let name: String = r.try_get("constraint_name").map_err(|e| e.to_string())?;
+                let constraint_type: String = r.try_get("constraint_type").map_err(|e| e.to_string())?;
+                let check_raw: String = r.try_get("check_clause").unwrap_or_default();
+                let f_schema: String = r.try_get("foreign_schema").unwrap_or_default();
+                let f_table: String = r.try_get("foreign_table").unwrap_or_default();
+                let l_cols_raw: String = r.try_get("local_columns").unwrap_or_default();
+                let f_cols_raw: String = r.try_get("foreign_columns").unwrap_or_default();
+                let on_delete_raw: String = r.try_get("on_delete").unwrap_or_default();
+                let on_update_raw: String = r.try_get("on_update").unwrap_or_default();
+
+                let columns: Vec<String> = l_cols_raw
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+
+                let foreign_columns = if f_cols_raw.is_empty() {
+                    None
+                } else {
+                    Some(
+                        f_cols_raw
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect(),
+                    )
+                };
+
+                out.push(TableConstraint {
+                    name,
+                    constraint_type,
+                    columns,
+                    check_clause: if check_raw.is_empty() { None } else { Some(check_raw) },
+                    foreign_schema: if f_schema.is_empty() { None } else { Some(f_schema) },
+                    foreign_table: if f_table.is_empty() { None } else { Some(f_table) },
+                    foreign_columns,
+                    on_delete: if on_delete_raw.is_empty() { None } else { Some(on_delete_raw) },
+                    on_update: if on_update_raw.is_empty() { None } else { Some(on_update_raw) },
+                });
+            }
+            Ok(out)
+        }
+    }
+}
+
+pub async fn create_index(
+    session: &Session,
+    schema: &str,
+    table: &str,
+    input: CreateIndexInput,
+) -> Result<QueryResult, String> {
+    if input.columns.is_empty() {
+        return Err("Index requires at least one column.".to_string());
+    }
+    let index_name = if input.name.trim().is_empty() {
+        format!("idx_{table}_{}", input.columns.join("_"))
+    } else {
+        input.name.trim().to_string()
+    };
+
+    let cols = input
+        .columns
+        .iter()
+        .map(|c| quote_ident(c, session.kind))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let unique = if input.unique { "UNIQUE " } else { "" };
+    let table_q = qualified_name(schema, table, session.kind);
+    let idx_q = quote_ident(&index_name, session.kind);
+
+    let sql = match session.kind {
+        DbKind::Postgres => {
+            let itype = input.index_type.as_deref().unwrap_or("BTREE");
+            format!("CREATE {unique}INDEX {idx_q} ON {table_q} USING {itype} ({cols})")
+        }
+        DbKind::Mysql => {
+            let itype = match input.index_type.as_deref() {
+                Some("HASH") => " USING HASH",
+                Some("FULLTEXT") => {
+                    return execute(session, &format!("CREATE FULLTEXT INDEX {idx_q} ON {table_q} ({cols})")).await;
+                }
+                Some("SPATIAL") => {
+                    return execute(session, &format!("CREATE SPATIAL INDEX {idx_q} ON {table_q} ({cols})")).await;
+                }
+                _ => "",
+            };
+            format!("CREATE {unique}INDEX {idx_q} ON {table_q} ({cols}){itype}")
+        }
+    };
+
+    execute(session, &sql).await
+}
+
+pub async fn drop_index(
+    session: &Session,
+    schema: &str,
+    table: &str,
+    index_name: &str,
+) -> Result<QueryResult, String> {
+    let name = index_name.trim();
+    if name.is_empty() {
+        return Err("Index name is required.".to_string());
+    }
+    let sql = match session.kind {
+        DbKind::Postgres => {
+            format!("DROP INDEX {}", qualified_name(schema, name, session.kind))
+        }
+        DbKind::Mysql => {
+            format!("DROP INDEX {} ON {}", quote_ident(name, session.kind), qualified_name(schema, table, session.kind))
+        }
+    };
+    execute(session, &sql).await
+}
+
+pub async fn create_constraint(
+    session: &Session,
+    schema: &str,
+    table: &str,
+    input: CreateConstraintInput,
+) -> Result<QueryResult, String> {
+    let table_q = qualified_name(schema, table, session.kind);
+    let cname_clause = if input.name.trim().is_empty() {
+        String::new()
+    } else {
+        format!("CONSTRAINT {} ", quote_ident(input.name.trim(), session.kind))
+    };
+
+    let sql = match input.constraint_type.to_uppercase().as_str() {
+        "UNIQUE" => {
+            if input.columns.is_empty() {
+                return Err("Unique constraint requires at least one column.".to_string());
+            }
+            let cols = input.columns.iter().map(|c| quote_ident(c, session.kind)).collect::<Vec<_>>().join(", ");
+            format!("ALTER TABLE {table_q} ADD {cname_clause}UNIQUE ({cols})")
+        }
+        "CHECK" => {
+            let expr = input.check_clause.as_deref().unwrap_or("").trim();
+            if expr.is_empty() {
+                return Err("Check constraint requires a condition expression.".to_string());
+            }
+            format!("ALTER TABLE {table_q} ADD {cname_clause}CHECK ({expr})")
+        }
+        "FOREIGN KEY" | "FOREIGN_KEY" => {
+            if input.columns.is_empty() {
+                return Err("Foreign key requires local columns.".to_string());
+            }
+            let ref_table = input.foreign_table.as_deref().unwrap_or("").trim();
+            if ref_table.is_empty() {
+                return Err("Foreign key requires target referenced table.".to_string());
+            }
+            let ref_schema = input.foreign_schema.as_deref().unwrap_or(schema);
+            let ref_q = qualified_name(ref_schema, ref_table, session.kind);
+            let cols = input.columns.iter().map(|c| quote_ident(c, session.kind)).collect::<Vec<_>>().join(", ");
+            let fcols_vec = input.foreign_columns.unwrap_or_else(|| input.columns.clone());
+            let fcols = fcols_vec.iter().map(|c| quote_ident(c, session.kind)).collect::<Vec<_>>().join(", ");
+
+            let mut s = format!("ALTER TABLE {table_q} ADD {cname_clause}FOREIGN KEY ({cols}) REFERENCES {ref_q} ({fcols})");
+            if let Some(od) = input.on_delete.as_deref() {
+                if !od.trim().is_empty() {
+                    s.push_str(&format!(" ON DELETE {od}"));
+                }
+            }
+            if let Some(ou) = input.on_update.as_deref() {
+                if !ou.trim().is_empty() {
+                    s.push_str(&format!(" ON UPDATE {ou}"));
+                }
+            }
+            s
+        }
+        other => return Err(format!("Unsupported constraint type: {other}")),
+    };
+
+    execute(session, &sql).await
+}
+
+pub async fn drop_constraint(
+    session: &Session,
+    schema: &str,
+    table: &str,
+    constraint_name: &str,
+    constraint_type: &str,
+) -> Result<QueryResult, String> {
+    let name = constraint_name.trim();
+    if name.is_empty() {
+        return Err("Constraint name is required.".to_string());
+    }
+    let table_q = qualified_name(schema, table, session.kind);
+    let cname_q = quote_ident(name, session.kind);
+
+    let sql = match session.kind {
+        DbKind::Postgres => format!("ALTER TABLE {table_q} DROP CONSTRAINT {cname_q}"),
+        DbKind::Mysql => match constraint_type.to_uppercase().as_str() {
+            "PRIMARY KEY" => format!("ALTER TABLE {table_q} DROP PRIMARY KEY"),
+            "FOREIGN KEY" | "FOREIGN_KEY" => format!("ALTER TABLE {table_q} DROP FOREIGN KEY {cname_q}"),
+            "CHECK" => format!("ALTER TABLE {table_q} DROP CHECK {cname_q}"),
+            _ => format!("ALTER TABLE {table_q} DROP INDEX {cname_q}"),
+        },
+    };
+
+    execute(session, &sql).await
+}
+
+pub async fn list_foreign_keys(
+    session: &Session,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<ForeignKeyRef>, String> {
+    match &session.pool {
+        DbPool::Postgres(pool) => {
+            let sql = "SELECT
+                kcu.column_name::text,
+                ccu.table_schema::text AS foreign_schema,
+                ccu.table_name::text AS foreign_table,
+                ccu.column_name::text AS foreign_column
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu
+              ON tc.constraint_name = kcu.constraint_name
+             AND tc.table_schema = kcu.table_schema
+            JOIN information_schema.constraint_column_usage ccu
+              ON ccu.constraint_name = tc.constraint_name
+             AND ccu.table_schema = tc.table_schema
+            WHERE tc.constraint_type = 'FOREIGN KEY'
+              AND tc.table_schema = $1
+              AND tc.table_name = $2";
+
+            let rows = sqlx::query(sql)
+                .bind(schema)
+                .bind(table)
+                .fetch_all(pool)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            rows.iter()
+                .map(|r| {
+                    Ok(ForeignKeyRef {
+                        column: r.try_get("column_name").map_err(|e| e.to_string())?,
+                        foreign_schema: r.try_get("foreign_schema").map_err(|e| e.to_string())?,
+                        foreign_table: r.try_get("foreign_table").map_err(|e| e.to_string())?,
+                        foreign_column: r.try_get("foreign_column").map_err(|e| e.to_string())?,
+                    })
+                })
+                .collect()
+        }
+        DbPool::Mysql(pool) => {
+            let sql = "SELECT
+                CONVERT(kcu.column_name USING utf8mb4) AS column_name,
+                CONVERT(kcu.referenced_table_schema USING utf8mb4) AS foreign_schema,
+                CONVERT(kcu.referenced_table_name USING utf8mb4) AS foreign_table,
+                CONVERT(kcu.referenced_column_name USING utf8mb4) AS foreign_column
+            FROM information_schema.key_column_usage kcu
+            WHERE kcu.referenced_table_name IS NOT NULL
+              AND kcu.table_schema = ?
+              AND kcu.table_name = ?";
+
+            let rows = sqlx::query(sql)
+                .bind(schema)
+                .bind(table)
+                .fetch_all(pool)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            rows.iter()
+                .map(|r| {
+                    Ok(ForeignKeyRef {
+                        column: r.try_get("column_name").map_err(|e| e.to_string())?,
+                        foreign_schema: r.try_get("foreign_schema").map_err(|e| e.to_string())?,
+                        foreign_table: r.try_get("foreign_table").map_err(|e| e.to_string())?,
+                        foreign_column: r.try_get("foreign_column").map_err(|e| e.to_string())?,
+                    })
+                })
+                .collect()
+        }
+    }
 }
 
 fn column_definition(column: &NewColumn, kind: DbKind) -> Result<String, String> {
@@ -1448,9 +2316,126 @@ pub async fn rename_database(
     }
 }
 
+pub async fn dump_table_sql(
+    session: &Session,
+    schema: &str,
+    table: &str,
+) -> Result<String, String> {
+    let mut out = String::new();
+    let q = qualified_name(schema, table, session.kind);
+    out.push_str(&format!("-- -----------------------------------------------------\n"));
+    out.push_str(&format!("-- Table structure & data for {q}\n"));
+    out.push_str(&format!("-- -----------------------------------------------------\n\n"));
+
+    let cols = describe_table(session, schema, table).await?;
+    if cols.is_empty() {
+        return Err(format!("Could not introspect columns for {q}."));
+    }
+
+    out.push_str(&format!("DROP TABLE IF EXISTS {q};\n"));
+
+    let mut defs = Vec::new();
+    for c in &cols {
+        let col_name = quote_ident(&c.name, session.kind);
+        let mut def = format!("{col_name} {}", c.type_name);
+        if !c.nullable {
+            def.push_str(" NOT NULL");
+        }
+        if let Some(d) = &c.default_value {
+            if !d.is_empty() {
+                def.push_str(&format!(" DEFAULT {d}"));
+            }
+        }
+        defs.push(def);
+    }
+    let pks = cols
+        .iter()
+        .filter(|c| c.primary_key)
+        .map(|c| quote_ident(&c.name, session.kind))
+        .collect::<Vec<_>>();
+    if !pks.is_empty() {
+        defs.push(format!("PRIMARY KEY ({})", pks.join(", ")));
+    }
+
+    out.push_str(&format!("CREATE TABLE {q} (\n  {}\n);\n\n", defs.join(",\n  ")));
+
+    // Data rows
+    let select_sql = format!("SELECT * FROM {q}");
+    let rows_res = execute(session, &select_sql).await?;
+    if !rows_res.rows.is_empty() {
+        let col_names = rows_res
+            .columns
+            .iter()
+            .map(|c| quote_ident(&c.name, session.kind))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        for chunk in rows_res.rows.chunks(100) {
+            let mut value_tuples = Vec::new();
+            for row in chunk {
+                let row_literals = row
+                    .iter()
+                    .map(|v| match v {
+                        serde_json::Value::Null => "NULL".to_string(),
+                        serde_json::Value::Bool(b) => {
+                            if *b {
+                                "TRUE".to_string()
+                            } else {
+                                "FALSE".to_string()
+                            }
+                        }
+                        serde_json::Value::Number(n) => n.to_string(),
+                        serde_json::Value::String(s) => sql_literal(s, session.kind),
+                        other => sql_literal(&other.to_string(), session.kind),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                value_tuples.push(format!("({row_literals})"));
+            }
+            out.push_str(&format!(
+                "INSERT INTO {q} ({col_names}) VALUES\n  {};\n",
+                value_tuples.join(",\n  ")
+            ));
+        }
+        out.push('\n');
+    }
+
+    Ok(out)
+}
+
+pub async fn dump_database_sql(
+    session: &Session,
+    schema_or_db: &str,
+) -> Result<String, String> {
+    let mut out = String::new();
+    out.push_str(&format!("-- =====================================================\n"));
+    out.push_str(&format!("-- ChillDB SQL Dump for: {schema_or_db}\n"));
+    out.push_str(&format!("-- Engine: {:?}\n", session.kind));
+    out.push_str(&format!("-- Date: {}\n", sqlx::types::chrono::Utc::now().to_rfc3339()));
+    out.push_str(&format!("-- =====================================================\n\n"));
+
+    let tables = list_tables(session, schema_or_db).await?;
+    let regular_tables = tables
+        .iter()
+        .filter(|t| !t.kind.to_uppercase().contains("VIEW"))
+        .collect::<Vec<_>>();
+
+    for t in regular_tables {
+        let table_dump = dump_table_sql(session, &t.schema, &t.name).await?;
+        out.push_str(&table_dump);
+        out.push('\n');
+    }
+
+    Ok(out)
+}
+
 pub async fn execute(session: &Session, sql: &str) -> Result<QueryResult, String> {
     let started = Instant::now();
     let returning_rows = is_row_returning(sql);
+
+    if session.target.read_only && !returning_rows {
+        return Err("Database connection is in READ-ONLY mode. Modifications are blocked.".to_string());
+    }
 
     match &session.pool {
         DbPool::Postgres(pool) => {

@@ -1,17 +1,25 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   CellInput,
+  CreateConstraintInput,
+  CreateIndexInput,
   DbKind,
   EditColumn,
   FilterCondition,
+  ForeignKeyRef,
   NewColumn,
   Profile,
   QueryResult,
+  RoutineInfo,
   SavedCredentials,
+  SchemaIndexInfo,
   SessionInfo,
   SortColumn,
   TableColumn,
+  TableConstraint,
+  TableIndex,
   TableInfo,
+  TriggerInfo,
 } from "./types";
 
 const recentReports = new Map<string, number>();
@@ -120,6 +128,18 @@ export const api = {
     return invoke("list_tables", { connectionId, schema });
   },
 
+  listRoutines(connectionId: string, schema: string): Promise<RoutineInfo[]> {
+    return invoke("list_routines", { connectionId, schema });
+  },
+
+  listTriggers(connectionId: string, schema: string): Promise<TriggerInfo[]> {
+    return invoke("list_triggers", { connectionId, schema });
+  },
+
+  listSchemaIndexes(connectionId: string, schema: string): Promise<SchemaIndexInfo[]> {
+    return invoke("list_schema_indexes", { connectionId, schema });
+  },
+
   describeTable(
     connectionId: string,
     schema: string,
@@ -184,8 +204,104 @@ export const api = {
     return invoke("delete_row", { connectionId, schema, table, keys });
   },
 
+  deleteRows(
+    connectionId: string,
+    schema: string,
+    table: string,
+    rowsKeys: CellInput[][],
+  ): Promise<QueryResult> {
+    return invoke("delete_rows", {
+      connectionId,
+      schema,
+      table,
+      rowsKeys,
+    });
+  },
+
+  listForeignKeys(
+    connectionId: string,
+    schema: string,
+    table: string,
+  ): Promise<ForeignKeyRef[]> {
+    return invoke("list_foreign_keys", { connectionId, schema, table });
+  },
+
   runQuery(connectionId: string, sql: string): Promise<QueryResult> {
     return invoke("run_query", { connectionId, sql });
+  },
+
+  dumpTableSql(
+    connectionId: string,
+    schema: string,
+    table: string,
+  ): Promise<string> {
+    return invoke("dump_table_sql", { connectionId, schema, table });
+  },
+
+  dumpDatabaseSql(
+    connectionId: string,
+    schemaOrDb: string,
+  ): Promise<string> {
+    return invoke("dump_database_sql", { connectionId, schemaOrDb });
+  },
+
+  listIndexes(
+    connectionId: string,
+    schema: string,
+    table: string,
+  ): Promise<TableIndex[]> {
+    return invoke("list_indexes", { connectionId, schema, table });
+  },
+
+  listConstraints(
+    connectionId: string,
+    schema: string,
+    table: string,
+  ): Promise<TableConstraint[]> {
+    return invoke("list_constraints", { connectionId, schema, table });
+  },
+
+  createIndex(
+    connectionId: string,
+    schema: string,
+    table: string,
+    input: CreateIndexInput,
+  ): Promise<QueryResult> {
+    return invoke("create_index", { connectionId, schema, table, input });
+  },
+
+  dropIndex(
+    connectionId: string,
+    schema: string,
+    table: string,
+    indexName: string,
+  ): Promise<QueryResult> {
+    return invoke("drop_index", { connectionId, schema, table, indexName });
+  },
+
+  createConstraint(
+    connectionId: string,
+    schema: string,
+    table: string,
+    input: CreateConstraintInput,
+  ): Promise<QueryResult> {
+    return invoke("create_constraint", { connectionId, schema, table, input });
+  },
+
+  dropConstraint(
+    connectionId: string,
+    schema: string,
+    table: string,
+    constraintName: string,
+    constraintType: string,
+  ): Promise<QueryResult> {
+    return invoke("drop_constraint", {
+      connectionId,
+      schema,
+      table,
+      constraintName,
+      constraintType,
+    });
   },
 
   createSchema(
