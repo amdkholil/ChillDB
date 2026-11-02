@@ -36,6 +36,7 @@ jobs:
         platform:
           - ubuntu-22.04
           - windows-latest
+          - macos-latest
 
     steps:
       - name: Checkout
@@ -90,5 +91,6 @@ jobs:
 
             - Linux: `.AppImage`, `.deb`, or `.rpm`
             - Windows: `.msi` or `.exe` (NSIS)
+            - macOS: `.dmg` or `.app`
           releaseDraft: true
           prerelease: false

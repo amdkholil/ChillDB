@@ -196,6 +196,8 @@ async fn connect(
         kind: session.kind,
         database: session.database.clone(),
         server_version: session.server_version.clone(),
+        ssl_enabled: session.target.ssl || !session.target.ssl_mode.is_empty(),
+        read_only: session.target.read_only,
     };
 
     state
@@ -220,6 +222,8 @@ async fn switch_database(
         kind: switched.kind,
         database: switched.database.clone(),
         server_version: switched.server_version.clone(),
+        ssl_enabled: switched.target.ssl || !switched.target.ssl_mode.is_empty(),
+        read_only: switched.target.read_only,
     };
     state
         .sessions
@@ -288,6 +292,36 @@ async fn list_tables(
 ) -> Result<Vec<TableInfo>, String> {
     let session = get_session(&state, &connection_id)?;
     db::list_tables(&session, &schema).await
+}
+
+#[tauri::command]
+async fn list_routines(
+    connection_id: String,
+    schema: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<db::RoutineInfo>, String> {
+    let session = get_session(&state, &connection_id)?;
+    db::list_routines(&session, &schema).await
+}
+
+#[tauri::command]
+async fn list_triggers(
+    connection_id: String,
+    schema: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<db::TriggerInfo>, String> {
+    let session = get_session(&state, &connection_id)?;
+    db::list_triggers(&session, &schema).await
+}
+
+#[tauri::command]
+async fn list_schema_indexes(
+    connection_id: String,
+    schema: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<db::SchemaIndexInfo>, String> {
+    let session = get_session(&state, &connection_id)?;
+    db::list_schema_indexes(&session, &schema).await
 }
 
 #[tauri::command]
@@ -386,6 +420,29 @@ async fn delete_row(
 ) -> Result<QueryResult, String> {
     let session = get_session(&state, &connection_id)?;
     timed(db::delete_row(&session, &schema, &table, &keys)).await
+}
+
+#[tauri::command]
+async fn delete_rows(
+    connection_id: String,
+    schema: String,
+    table: String,
+    rows_keys: Vec<Vec<CellInput>>,
+    state: State<'_, AppState>,
+) -> Result<QueryResult, String> {
+    let session = get_session(&state, &connection_id)?;
+    timed(db::delete_rows(&session, &schema, &table, &rows_keys)).await
+}
+
+#[tauri::command]
+async fn list_foreign_keys(
+    connection_id: String,
+    schema: String,
+    table: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<db::ForeignKeyRef>, String> {
+    let session = get_session(&state, &connection_id)?;
+    timed(db::list_foreign_keys(&session, &schema, &table)).await
 }
 
 #[tauri::command]
@@ -539,6 +596,98 @@ async fn run_query(
 }
 
 #[tauri::command]
+async fn dump_table_sql(
+    connection_id: String,
+    schema: String,
+    table: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let session = get_session(&state, &connection_id)?;
+    timed(db::dump_table_sql(&session, &schema, &table)).await
+}
+
+#[tauri::command]
+async fn dump_database_sql(
+    connection_id: String,
+    schema_or_db: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let session = get_session(&state, &connection_id)?;
+    timed(db::dump_database_sql(&session, &schema_or_db)).await
+}
+
+#[tauri::command]
+async fn list_indexes(
+    connection_id: String,
+    schema: String,
+    table: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<db::TableIndex>, String> {
+    let session = get_session(&state, &connection_id)?;
+    timed(db::list_indexes(&session, &schema, &table)).await
+}
+
+#[tauri::command]
+async fn list_constraints(
+    connection_id: String,
+    schema: String,
+    table: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<db::TableConstraint>, String> {
+    let session = get_session(&state, &connection_id)?;
+    timed(db::list_constraints(&session, &schema, &table)).await
+}
+
+#[tauri::command]
+async fn create_index(
+    connection_id: String,
+    schema: String,
+    table: String,
+    input: db::CreateIndexInput,
+    state: State<'_, AppState>,
+) -> Result<QueryResult, String> {
+    let session = get_session(&state, &connection_id)?;
+    timed(db::create_index(&session, &schema, &table, input)).await
+}
+
+#[tauri::command]
+async fn drop_index(
+    connection_id: String,
+    schema: String,
+    table: String,
+    index_name: String,
+    state: State<'_, AppState>,
+) -> Result<QueryResult, String> {
+    let session = get_session(&state, &connection_id)?;
+    timed(db::drop_index(&session, &schema, &table, &index_name)).await
+}
+
+#[tauri::command]
+async fn create_constraint(
+    connection_id: String,
+    schema: String,
+    table: String,
+    input: db::CreateConstraintInput,
+    state: State<'_, AppState>,
+) -> Result<QueryResult, String> {
+    let session = get_session(&state, &connection_id)?;
+    timed(db::create_constraint(&session, &schema, &table, input)).await
+}
+
+#[tauri::command]
+async fn drop_constraint(
+    connection_id: String,
+    schema: String,
+    table: String,
+    constraint_name: String,
+    constraint_type: String,
+    state: State<'_, AppState>,
+) -> Result<QueryResult, String> {
+    let session = get_session(&state, &connection_id)?;
+    timed(db::drop_constraint(&session, &schema, &table, &constraint_name, &constraint_type)).await
+}
+
+#[tauri::command]
 fn db_kinds() -> Vec<DbKind> {
     vec![DbKind::Postgres, DbKind::Mysql]
 }
@@ -581,6 +730,9 @@ pub fn run() {
             list_schemas,
             list_enum_types,
             list_tables,
+            list_routines,
+            list_triggers,
+            list_schema_indexes,
             search_tables,
             list_databases,
             describe_table,
@@ -588,6 +740,8 @@ pub fn run() {
             insert_row,
             update_row,
             delete_row,
+            delete_rows,
+            list_foreign_keys,
             create_table,
             drop_table,
             truncate_table,
@@ -601,6 +755,14 @@ pub fn run() {
             drop_database,
             rename_database,
             run_query,
+            dump_table_sql,
+            dump_database_sql,
+            list_indexes,
+            list_constraints,
+            create_index,
+            drop_index,
+            create_constraint,
+            drop_constraint,
             db_kinds
         ])
         .run(tauri::generate_context!())

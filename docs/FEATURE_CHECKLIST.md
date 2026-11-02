@@ -40,9 +40,9 @@ Dokumen checklist kebutuhan fitur database client modern untuk memandu pengemban
 - [x] Pencarian tabel cepat (Quick Search)
 - [ ] Filter / Grouping tabel berdasarkan prefix atau tag
 - [x] Introspeksi Tipe Enum kustom
-- [ ] Daftar Stored Procedures / Functions
-- [ ] Daftar Triggers
-- [ ] Daftar Indexes
+- [x] Daftar Stored Procedures / Functions
+- [x] Daftar Triggers
+- [x] Daftar Indexes
 - [ ] Visualizer Relasi Tabel / Schema ERD Diagram
 
 ---
@@ -54,13 +54,13 @@ Dokumen checklist kebutuhan fitur database client modern untuk memandu pengemban
 - [x] Filter data dinamis via UI (WHERE builder tanpa nulis query)
 - [x] Quick Search / Highlight data di dalam grid
 - [x] Inline cell editing
-- [x] Insert record / row baru
+- [x] Inline Insert record / row baru langsung di baris grid tabel (tanpa modal)
 - [x] Delete record dengan konfirmasi
-- [ ] Batch edit / Multi-row selection & bulk delete
-- [ ] JSON / XML Viewer terintegrasi pada cell dengan format panjang
-- [ ] Foreign Key navigation (klik nilai ID untuk lompat ke record tabel relasi)
+- [x] Multi-row selection & bulk delete
+- [x] JSON / XML Viewer terintegrasi pada cell dengan format panjang
+- [x] Foreign Key navigation (klik nilai ID untuk lompat ke record tabel relasi)
 - [ ] Binary / BLOB / Image preview di cell
-- [ ] Pengaturan visibilitas dan urutan kolom (Hide / Reorder columns)
+- [x] Pengaturan visibilitas dan urutan kolom (Hide / Reorder columns)
 
 ---
 
@@ -91,16 +91,18 @@ Dokumen checklist kebutuhan fitur database client modern untuk memandu pengemban
 - [x] Add Column
 - [x] Edit Column (Ubah nama, tipe, default value, nullable)
 - [x] Drop Column
-- [ ] GUI Manajemen Index (Create, Drop, Index Type)
-- [ ] GUI Manajemen Foreign Key & Constraints (Unique, Check)
+- [x] GUI Manajemen Index (Create, Drop, Index Type)
+- [x] GUI Manajemen Foreign Key & Constraints (Unique, Check)
 - [ ] Generator DDL script ("Show Create Table" / "Generate DDL")
 
 ---
 
 ## 7. Import & Export Data
+- [x] Generator Data Dummy / Mock Data (Faker button untuk testing insert baris)
+- [x] Dukungan SSL/TLS Connection Mode & Read-only Connection Mode (dengan visual badge)
 - [ ] Export hasil query / tabel ke CSV
 - [ ] Export ke format JSON
-- [ ] Export ke SQL Dump (`INSERT` statements / DDL dump)
+- [x] Export ke SQL Dump (`INSERT` statements / DDL dump)
 - [ ] Export ke Excel (`.xlsx`)
 - [ ] Import data dari file CSV ke tabel
 - [ ] Import data dari file SQL script
@@ -111,6 +113,7 @@ Dokumen checklist kebutuhan fitur database client modern untuk memandu pengemban
 ## 8. UX, Kinerja & Sistem
 - [x] Tauri native desktop app (Resource hemat & ringan)
 - [ ] Multiple window support / Detachable tabs
+- [x] Context menu pada tab (Close, Close Others, Close to the Right, Close to the Left, Close All)
 - [ ] Keyboard shortcuts lengkap (Run query `Ctrl+Enter`, New tab `Ctrl+T`, Search `Ctrl+P`)
 - [ ] Tema gelap & terang (Dark / Light Theme toggle)
 - [x] Auto-updater tersertifikasi (Signed binary update)
