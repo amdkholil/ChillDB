@@ -45,5 +45,10 @@ export const icons = {
   ),
   folder: svg('<path d="M3 6h6l2 2h10v10H3z"/>'),
   search: svg('<circle cx="11" cy="11" r="6"/><path d="M16 16l4 4"/>'),
+  filter: svg(
+    '<polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>',
+  ),
+  sortAsc: svg('<path d="M11 5h10M11 9h7M11 13h4M3 17l3 3 3-3M6 18V4"/>'),
+  sortDesc: svg('<path d="M11 5h10M11 9h7M11 13h4M3 7l3-3 3 3M6 6v14"/>'),
   bolt: svg('<path d="M13 3L5 14h6l-1 7 8-11h-6z"/>'),
 };

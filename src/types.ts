@@ -94,6 +94,17 @@ export interface QueryTab {
   running: boolean;
 }
 
+export interface SortColumn {
+  column: string;
+  desc: boolean;
+}
+
+export interface FilterCondition {
+  column: string;
+  op: string;
+  value: string;
+}
+
 export interface TableTab {
   id: string;
   type: "table";
@@ -106,6 +117,10 @@ export interface TableTab {
   page: number;
   pageSize: number;
   selectedRow: number | null;
+  sort: SortColumn[];
+  filters: FilterCondition[];
+  search: string;
+  filterOpen?: boolean;
   result?: QueryResult;
   columns?: TableColumn[];
   error?: string;

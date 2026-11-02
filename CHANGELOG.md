@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-02
+
+### Added
+- Table quick search input for searching text across active table columns.
+- Interactive WHERE filter builder toolbar with customizable conditions and operators.
+- Multi-column sorting support with column header click / Shift-click toggle.
+- Refresh buttons for databases, schemas, and table trees in the sidebar for live reloading.
+
+### Removed
+- Database type badge (PG/MY) from connection rows in the sidebar.
+
 ## [0.3.1] - 2026-10-21
 
 ### Added
